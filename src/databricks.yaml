@@ -5,7 +5,7 @@ variables:
   sql_warehouse_id:
     description: "ID of the SQL warehouse to use"
     lookup:
-      warehouse: "default"
+      warehouse: "Serverless Starter Warehouse"
   catalog_name:
     description: "Name of the catalog to use"
     default: "app_data"

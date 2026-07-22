@@ -15,11 +15,13 @@ env:
   - name: "FRONTEND_STATIC_DIR"
     value: "./static"
 
-  # Keep valueFrom to trigger database resource injection (PGHOST is also auto-injected with same value)
-  # - name: "PGHOST"
-  #   valueFrom: "database"
-  # PGDATABASE, PGPORT, PGUSER are auto-injected by Databricks Apps
-  # Keep schema (no PG* auto-injection):
+  # Lakebase Autoscaling: attach the branch's `databricks_postgres` resource
+  # (manifest key: "postgres") so PGHOST/PGPORT/PGUSER are injected.
+  # App data lives in the `app_ontos` database on the production branch.
+  - name: "PGHOST"
+    valueFrom: "postgres"
+  - name: "PGDATABASE"
+    value: "app_ontos"
   - name: "PGSCHEMA"
     value: "app_ontos"
   # Fallback for Lakebase when SDK < 0.95.0 can't read postgres app resource
