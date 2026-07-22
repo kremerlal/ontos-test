@@ -17,6 +17,9 @@ interface HealthState {
   ws_ok: boolean;
   warnings: string[];
   db_error: string | null;
+  writes_enabled?: boolean;
+  storage_mode?: string;
+  unavailable_capabilities?: string[];
 }
 
 const HEALTH_POLL_INTERVAL_MS = 30_000;
@@ -86,6 +89,7 @@ export default function Layout({ children }: LayoutProps) {
   }, [refreshHealth]);
 
   const isDbDown = !!health && !health.db_ok;
+  const isReadOnlyMode = !!health && health.writes_enabled === false;
   // Suppress the soft warning banner when the DB is down: startup short-circuits
   // before initialize_managers runs, so ws_ok stays false even though the real
   // problem is the DB. Showing both would be misleading.
@@ -111,6 +115,19 @@ export default function Layout({ children }: LayoutProps) {
         {/* Alerts wrapped in padded containers (not mx-6 on the Alert itself):
             shadcn Alert is `w-full`, so mx-6 would expand it past the
             parent and overflow horizontally by the margin width. */}
+        {isReadOnlyMode && !isDbDown && (
+          <div className="px-6 pt-4">
+            <Alert>
+              <DatabaseZap className="h-4 w-4" />
+              <AlertTitle>Read-only deployment (no Postgres OLTP)</AlertTitle>
+              <AlertDescription>
+                This workspace runs without a transactional metadata database. UC browse,
+                lineage, and mirror reads work; create/edit flows for products, contracts,
+                RBAC, and workflows are unavailable until external Postgres is configured.
+              </AlertDescription>
+            </Alert>
+          </div>
+        )}
         {isDbDown && (
           <div className="px-6 pt-4">
             <Alert variant="destructive">

@@ -77,7 +77,7 @@ def build_db_url(
     instance_name: str,
     ws_client: WorkspaceClient
 ) -> Tuple[str, str]:
-    """Build PostgreSQL connection URL using OAuth authentication.
+    """Build PostgreSQL connection URL using OAuth or password authentication.
     
     Returns: (connection_url, auth_user)
     """
@@ -87,6 +87,20 @@ def build_db_url(
     print(f"  POSTGRES_PORT: {port}")
     print(f"  POSTGRES_DB_SCHEMA: {schema}")
     print(f"  LAKEBASE_INSTANCE_NAME: {instance_name}")
+
+    use_password = (
+        os.environ.get("DB_USE_PASSWORD_AUTH", "").lower() in ("1", "true", "yes")
+        or os.environ.get("STORAGE_MODE", "").lower() == "postgres"
+    )
+    pg_user = os.environ.get("PGUSER") or os.environ.get("POSTGRES_USER", "")
+    pg_password = os.environ.get("PGPASSWORD") or os.environ.get("POSTGRES_PASSWORD", "")
+
+    if use_password and pg_user and pg_password:
+        print("  Authentication: password (external Postgres)")
+        query = f"?options=-csearch_path%3D{schema}" if schema else ""
+        connection_url = f"postgresql+psycopg2://{pg_user}:****@{host}:{port}/{db}{query}"
+        return connection_url.replace(":****@", f":{pg_password}@"), pg_user
+
     print(f"  Authentication: OAuth (Lakebase Postgres)")
     
     # Generate OAuth token

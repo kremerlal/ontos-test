@@ -8,7 +8,7 @@ variables:
       warehouse: "Serverless Starter Warehouse"
   catalog_name:
     description: "Name of the catalog to use"
-    default: "app_data"
+    default: "classic_stable_kremer_catalog"
   schema_name:
     description: "Name of the schema to use"
     default: "app_ontos"
@@ -55,12 +55,57 @@ resources:
 
 targets:
   dev:
+    default: true
     variables:
-      catalog_name: "app_data_dev"
-      schema_name: "app_ontos_dev"
+      catalog_name: "classic_stable_kremer_catalog"
+      schema_name: "ontos_test"
       volume_name: "app_files_dev"
-  prod:
+  #prod:
+  #  variables:
+  #    catalog_name: "app_data_prod"
+  #    schema_name: "app_ontos_prod"
+  #    volume_name: "app_files_prod"
+  no-lakebase:
+    # Unity Catalog without Lakebase — uc_native SoR (no Postgres/Lakebase).
+    # Bundle config overrides local app.yaml; STORAGE_MODE must be set here.
     variables:
-      catalog_name: "app_data_prod"
-      schema_name: "app_ontos_prod"
-      volume_name: "app_files_prod"
+      catalog_name: "classic_stable_kremer_catalog"
+      schema_name: "ontos_test"
+      volume_name: "app_files"
+      app_config:
+        command:
+          - "python"
+          - "backend/src/app.py"
+        env:
+          - name: "ENV"
+            value: "PROD"
+          - name: "STORAGE_MODE"
+            value: "uc_native"
+          - name: "APP_DEMO_MODE"
+            value: "false"
+          - name: "APP_AUDIT_VOLUME_ONLY"
+            value: "true"
+          - name: "APP_UC_MIRROR_ENABLED"
+            value: "false"
+          - name: "APP_UC_APP_SCHEMA"
+            value: "app_ontos"
+          - name: "PYTHONPATH"
+            value: "./backend:${PYTHONPATH}"
+          - name: "PYTHONUNBUFFERED"
+            value: "1"
+          - name: "FRONTEND_STATIC_DIR"
+            value: "./static"
+          - name: "DATABRICKS_WAREHOUSE_ID"
+            value: ${var.sql_warehouse_id}
+          - name: "DATABRICKS_CATALOG"
+            value: ${var.catalog_name}
+          - name: "DATABRICKS_SCHEMA"
+            value: ${var.schema_name}
+          - name: "DATABRICKS_VOLUME"
+            value: ${var.volume_name}
+          - name: "APP_ADMIN_DEFAULT_GROUPS"
+            value: '["admins", "users"]'
+          - name: "APP_AUDIT_LOG_DIR"
+            value: "/Volumes/${var.catalog_name}/${var.schema_name}/${var.volume_name}/audit_logs"
+          - name: "LLM_ENABLED"
+            value: "False"

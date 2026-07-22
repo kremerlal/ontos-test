@@ -67,6 +67,7 @@ class DirectoryProviderType(str, Enum):
 
     ENTRA = "entra"
     LAKEBASE = "lakebase"
+    UNITY_CATALOG = "unity_catalog"
     FILE = "file"
 
 
@@ -86,6 +87,7 @@ class DirectoryStatus(BaseModel):
     # the configured provider_type).
     connection_name: Optional[str] = None   # entra
     lakebase_table: Optional[str] = None    # lakebase
+    uc_table: Optional[str] = None          # unity_catalog
     file_path: Optional[str] = None         # file
 
 
@@ -113,6 +115,7 @@ class DirectorySettingsUpdate(BaseModel):
     provider_type: Optional[str] = None
     connection_name: Optional[str] = None
     lakebase_table: Optional[str] = None
+    uc_table: Optional[str] = None
     file_path: Optional[str] = None
 
 
@@ -120,4 +123,5 @@ class DirectorySettingsUpdate(BaseModel):
 SETTING_KEY_PROVIDER_TYPE = "DIRECTORY_PROVIDER_TYPE"
 SETTING_KEY_CONNECTION_NAME = "DIRECTORY_UC_HTTP_CONNECTION_NAME"
 SETTING_KEY_LAKEBASE_TABLE = "DIRECTORY_LAKEBASE_TABLE"
+SETTING_KEY_UC_TABLE = "DIRECTORY_UC_TABLE"
 SETTING_KEY_FILE_PATH = "DIRECTORY_FILE_PATH"

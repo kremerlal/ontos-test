@@ -35,6 +35,7 @@ class DirectoryProviderContext:
 
     ws_client: Any = None
     db_engine: Any = None
+    warehouse_id: Optional[str] = None
 
 
 @dataclass
@@ -48,12 +49,18 @@ class DirectoryProviderConfig:
 
     connection_name: Optional[str] = None   # entra
     lakebase_table: Optional[str] = None    # lakebase
+    uc_table: Optional[str] = None          # unity_catalog
     file_path: Optional[str] = None         # file
 
     def signature(self) -> Tuple[Optional[str], ...]:
         """A hashable representation used for cache invalidation."""
 
-        return (self.connection_name, self.lakebase_table, self.file_path)
+        return (
+            self.connection_name,
+            self.lakebase_table,
+            self.uc_table,
+            self.file_path,
+        )
 
 
 class DirectoryProvider(ABC):

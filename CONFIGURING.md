@@ -184,6 +184,12 @@ ENV=LOCAL
 
 When deploying to production with Databricks Lakebase, the application uses **OAuth token authentication** instead of passwords.
 
+Customers **without Lakebase** can deploy with **`STORAGE_MODE=uc_native`** (UC Delta
+system of record, no Postgres) or external Postgres with `STORAGE_MODE=postgres` and
+`DB_USE_PASSWORD_AUTH=true`. See [docs/handbook/deploying-without-lakebase.md](docs/handbook/deploying-without-lakebase.md).
+
+Runtime capability matrix: `GET /api/storage/capabilities`.
+
 ### How It Works
 
 - **Username detection:** Service principal username is auto-detected at runtime

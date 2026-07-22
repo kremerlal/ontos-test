@@ -4,15 +4,17 @@ env:
   - name: "ENV"
     value: "PROD"
   - name: "STORAGE_MODE"
-    value: "uc_native"
+    value: "postgres"
+  - name: "DB_USE_PASSWORD_AUTH"
+    value: "true"
   - name: "APP_DEMO_MODE"
+    value: "false"
+  - name: "APP_DB_DROP_ON_START"
     value: "false"
   - name: "APP_AUDIT_VOLUME_ONLY"
     value: "true"
   - name: "APP_UC_MIRROR_ENABLED"
-    value: "false"
-  - name: "APP_UC_APP_SCHEMA"
-    value: "app_ontos"
+    value: "true"
 
   - name: "PYTHONPATH"
     value: "./backend:${PYTHONPATH}"
@@ -21,15 +23,32 @@ env:
   - name: "FRONTEND_STATIC_DIR"
     value: "./static"
 
+  # External Postgres (not Lakebase). Set host/user/password via Databricks App secrets
+  # or bundle variables before deploy. PGDATABASE/PGSCHEMA match Ontos defaults.
+  - name: "PGHOST"
+    value: "${workspace.env.ONTOS_PG_HOST}"
+  - name: "PGPORT"
+    value: "5432"
+  - name: "PGUSER"
+    value: "${workspace.env.ONTOS_PG_USER}"
+  - name: "PGPASSWORD"
+    value: "${workspace.env.ONTOS_PG_PASSWORD}"
+  - name: "PGDATABASE"
+    value: "app_ontos"
+  - name: "PGSCHEMA"
+    value: "app_ontos"
+
   - name: "DATABRICKS_WAREHOUSE_ID"
     valueFrom: "sql-warehouse"
   - name: "DATABRICKS_VOLUME"
     valueFrom: "volume"
 
   - name: "APP_ADMIN_DEFAULT_GROUPS"
-    value: '["admins", "users"]'
+    value: '["admins"]'
   - name: "APP_AUDIT_LOG_DIR"
     value: "/Volumes/${workspace.env.DATABRICKS_CATALOG}/${workspace.env.DATABRICKS_SCHEMA}/${workspace.env.DATABRICKS_VOLUME}/audit_logs"
 
   - name: "LLM_ENABLED"
-    value: "False"
+    value: "True"
+  - name: "LLM_ENDPOINT"
+    valueFrom: "serving-endpoint"

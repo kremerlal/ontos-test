@@ -6,6 +6,7 @@ settings = get_settings()
 setup_logging(level=settings.LOG_LEVEL, log_file=settings.LOG_FILE)
 logger = get_logger(__name__)
 
+import asyncio
 import mimetypes
 import os
 import time
@@ -22,6 +23,7 @@ from starlette.responses import Response
 from fastapi import HTTPException, status
 
 from src.common.middleware import ErrorHandlingMiddleware, LoggingMiddleware, MaintenanceMiddleware
+from src.common.storage_guard import StorageWriteGuardMiddleware
 from src.routes import (
     access_grants_routes,
     catalog_commander_routes,
@@ -116,6 +118,11 @@ STATIC_ASSETS_PATH = BASE_DIR.parent / "static"
 # Application Startup Event
 async def startup_event():
     import os
+    from src.common.storage_mode import (
+        get_storage_capabilities,
+        requires_oltp_database,
+        resolve_storage_mode,
+    )
     
     # Initialize health state (must happen before anything else)
     app.state.health = {
@@ -125,6 +132,8 @@ async def startup_event():
         "warnings": [],
         "db_error": None,
         "seed_error": None,
+        "writes_enabled": True,
+        "storage_mode": "lakebase",
     }
     
     # Skip startup tasks if running tests
@@ -136,31 +145,65 @@ async def startup_event():
     
     logger.info("Running application startup event...")
     settings = get_settings()
+    storage_mode = resolve_storage_mode(settings)
+    app.state.storage_mode = storage_mode.value
+    caps = get_storage_capabilities(
+        storage_mode,
+        oltp_configured=bool(settings.PGHOST and settings.PGDATABASE),
+        uc_configured=bool(settings.DATABRICKS_WAREHOUSE_ID and settings.DATABRICKS_CATALOG),
+    )
+    app.state.health.update(caps)
     
-    try:
-        initialize_database()
+    if requires_oltp_database(storage_mode):
+        try:
+            initialize_database()
+            app.state.health["db_ok"] = True
+        except Exception as e:
+            app.state.health["db_error"] = str(e)
+            logger.critical(f"Database init failed — entering maintenance mode: {e}", exc_info=True)
+            return  # Skip manager init; MaintenanceMiddleware will serve the maintenance page
+    else:
+        logger.info("Non-OLTP mode (%s): skipping Postgres initialization", storage_mode.value)
         app.state.health["db_ok"] = True
-    except Exception as e:
-        app.state.health["db_error"] = str(e)
-        logger.critical(f"Database init failed — entering maintenance mode: {e}", exc_info=True)
-        return  # Skip manager init; MaintenanceMiddleware will serve the maintenance page
+        app.state.health["oltp_skipped"] = True
 
     # Seed reference data that alembic data-migrations would have inserted but
     # that create_all()+stamp cannot.  Idempotent — no-ops when rows exist.
-    try:
-        from src.repositories.certification_levels_repository import certification_levels_repo
-        from src.repositories.maturity_repository import maturity_repo
-        from src.common.database import get_session_factory
-        _sf = get_session_factory()
-        with _sf() as _db:
-            certification_levels_repo.seed_defaults(_db)
-            maturity_repo.seed_defaults(_db)
-            _db.commit()
-        logger.info("Reference data seed step complete.")
-    except Exception as e:
-        logger.warning(f"Failed seeding reference data: {e}", exc_info=True)
+    if requires_oltp_database(storage_mode):
+        try:
+            from src.repositories.certification_levels_repository import certification_levels_repo
+            from src.repositories.maturity_repository import maturity_repo
+            from src.common.database import get_session_factory
+            _sf = get_session_factory()
+            with _sf() as _db:
+                certification_levels_repo.seed_defaults(_db)
+                maturity_repo.seed_defaults(_db)
+                _db.commit()
+            logger.info("Reference data seed step complete.")
+        except Exception as e:
+            logger.warning(f"Failed seeding reference data: {e}", exc_info=True)
 
     initialize_managers(app)  # Soft-fails internally for ws_client; sets health["ws_ok"]
+
+    if settings.APP_UC_MIRROR_ENABLED and requires_oltp_database(storage_mode):
+        async def mirror_loop() -> None:
+            from src.common.uc_mirror import sync_configured_mirror
+
+            interval = max(settings.APP_UC_MIRROR_INTERVAL_SECONDS, 300)
+            while True:
+                try:
+                    counts = await asyncio.to_thread(
+                        sync_configured_mirror,
+                        settings,
+                    )
+                    logger.info("UC mirror sync complete: %s", counts)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("UC mirror sync failed: %s", exc, exc_info=True)
+                await asyncio.sleep(interval)
+
+        app.state.uc_mirror_task = asyncio.create_task(mirror_loop())
     
     # Initialize Git service for indirect delivery mode
     try:
@@ -231,6 +274,13 @@ async def startup_event():
 # Application Shutdown Event
 async def shutdown_event():
     logger.info("Running application shutdown event...")
+    mirror_task = getattr(app.state, "uc_mirror_task", None)
+    if mirror_task:
+        mirror_task.cancel()
+        try:
+            await mirror_task
+        except asyncio.CancelledError:
+            pass
     logger.info("Application shutdown complete.")
 
 # --- FastAPI App Instantiation (AFTER defining lifecycle functions) ---
@@ -336,6 +386,7 @@ app.add_middleware(
 # Add custom middleware (outermost middleware runs first)
 app.add_middleware(ErrorHandlingMiddleware)
 app.add_middleware(LoggingMiddleware)
+app.add_middleware(StorageWriteGuardMiddleware)
 app.add_middleware(MaintenanceMiddleware)
 
 # Mount static files for the React application (skip in test mode)
@@ -410,6 +461,10 @@ directory_routes.register_routes(app)
 connection_routes.register_routes(app)
 schema_import_routes.register_routes(app)
 term_mapping_routes.register_routes(app)
+from src.routes import storage_routes
+storage_routes.register_routes(app)
+from src.routes import uc_native_routes
+uc_native_routes.register_routes(app)
 
 # Define other specific API routes BEFORE the catch-all
 @app.get("/api/time")
@@ -454,10 +509,20 @@ async def retry_startup():
     anonymous callers in prod. The operation is idempotent.
     """
     settings = get_settings()
+    from src.common.storage_mode import requires_oltp_database, resolve_storage_mode
+
+    storage_mode = resolve_storage_mode(settings)
     try:
-        initialize_database()
+        if requires_oltp_database(storage_mode):
+            initialize_database()
+        else:
+            logger.info(
+                "Retry startup: skipping Postgres init in %s mode",
+                storage_mode.value,
+            )
         app.state.health["db_ok"] = True
         app.state.health["db_error"] = None
+        app.state.health["storage_mode"] = storage_mode.value
     except Exception as e:
         app.state.health["db_error"] = str(e)
         logger.critical(f"Database retry failed: {e}", exc_info=True)

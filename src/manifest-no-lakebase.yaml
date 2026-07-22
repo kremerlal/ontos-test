@@ -1,6 +1,6 @@
 version: 1
 name: "ontos"
-description: "Ontos — Unity Catalog deployment without Lakebase (external Postgres for OLTP)"
+description: "Ontos — Unity Catalog deployment without Lakebase (uc_native or external Postgres)"
 resource_specs:
   - name: "sql-warehouse"
     description: "SQL warehouse for the app to query datasets and UC mirrors"

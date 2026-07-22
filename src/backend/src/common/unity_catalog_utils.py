@@ -266,25 +266,25 @@ def ensure_catalog_exists(
     ws: WorkspaceClient,
     catalog_name: str,
     comment: Optional[str] = None,
-    properties: Optional[Dict[str, str]] = None
+    properties: Optional[Dict[str, str]] = None,
+    *,
+    create_if_missing: bool = True,
 ) -> str:
-    """Ensure a catalog exists, creating it if necessary (idempotent).
+    """Ensure a catalog exists, optionally creating it if missing (idempotent).
     
     Args:
         ws: Workspace client
         catalog_name: Name of the catalog (will be sanitized)
         comment: Optional comment/description for the catalog
         properties: Optional properties to set on the catalog
+        create_if_missing: When False, only verify the catalog exists (recommended
+            for Databricks Apps SPs, which typically lack CREATE CATALOG).
         
     Returns:
         The sanitized catalog name
         
     Raises:
-        HTTPException: If catalog name is invalid or creation fails
-        
-    Example:
-        >>> ensure_catalog_exists(ws, "my_catalog", "Test catalog")
-        "my_catalog"
+        HTTPException: If catalog name is invalid, missing, or creation fails
     """
     try:
         catalog_name = sanitize_uc_identifier(catalog_name)
@@ -293,19 +293,64 @@ def ensure_catalog_exists(
         raise HTTPException(status_code=400, detail="Invalid catalog name")
     
     try:
-        # Check if catalog exists
         ws.catalogs.get(catalog_name)
         logger.debug(f"Catalog '{catalog_name}' already exists")
-    except Exception:
-        # Catalog doesn't exist, create it
+        return catalog_name
+    except Exception as get_exc:
+        not_found = _is_not_found_error(get_exc)
+        if not not_found:
+            logger.error(
+                "Cannot access catalog '%s': %s", catalog_name, get_exc
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Cannot access catalog '{catalog_name}'. "
+                    "Grant the app service principal USE CATALOG on it, "
+                    f"or set DATABRICKS_CATALOG to a catalog you can use. ({get_exc})"
+                ),
+            ) from get_exc
+
+        if not create_if_missing:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Catalog '{catalog_name}' does not exist. "
+                    "Create it in Unity Catalog (metastore admin), then grant the "
+                    "app service principal USE CATALOG and CREATE SCHEMA. "
+                    "Databricks Apps typically cannot CREATE CATALOG themselves."
+                ),
+            ) from get_exc
+
         try:
             ws.catalogs.create(name=catalog_name, comment=comment, properties=properties)
             logger.info(f"Created catalog '{catalog_name}'")
         except Exception as e:
             logger.error("Failed to create catalog '%s': %s", catalog_name, e)
-            raise HTTPException(status_code=500, detail="Failed to create catalog")
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Failed to create catalog '{catalog_name}': {e}. "
+                    "Pre-create the catalog with a metastore admin and grant the "
+                    "app USE CATALOG + CREATE SCHEMA (Apps SPs usually lack CREATE CATALOG)."
+                ),
+            ) from e
     
     return catalog_name
+
+
+def _is_not_found_error(exc: Exception) -> bool:
+    """Best-effort detection of Databricks 'resource does not exist' errors."""
+    text = str(exc).lower()
+    name = type(exc).__name__.lower()
+    if "notfound" in name or "not_found" in name or "does not exist" in text:
+        return True
+    if "RESOURCE_DOES_NOT_EXIST" in str(exc):
+        return True
+    status = getattr(exc, "status", None) or getattr(exc, "error_code", None)
+    if status in (404, "NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"):
+        return True
+    return False
 
 
 def ensure_schema_exists(
@@ -497,7 +542,9 @@ def ensure_catalog_and_schema_exist(
     catalog_name: str,
     schema_name: str,
     catalog_comment: Optional[str] = None,
-    schema_comment: Optional[str] = None
+    schema_comment: Optional[str] = None,
+    *,
+    create_catalog_if_missing: bool = True,
 ) -> tuple[str, str]:
     """Ensure both catalog and schema exist, creating them if necessary.
     
@@ -510,18 +557,21 @@ def ensure_catalog_and_schema_exist(
         schema_name: Name of the schema (will be sanitized)
         catalog_comment: Optional catalog comment
         schema_comment: Optional schema comment
+        create_catalog_if_missing: When False, require an existing catalog
+            (Apps SPs usually cannot CREATE CATALOG).
         
     Returns:
         Tuple of (catalog_name, full_schema_name)
         
     Raises:
         HTTPException: If names are invalid or creation fails
-        
-    Example:
-        >>> ensure_catalog_and_schema_exist(ws, "my_catalog", "my_schema")
-        ("my_catalog", "my_catalog.my_schema")
     """
-    catalog_name = ensure_catalog_exists(ws, catalog_name, comment=catalog_comment)
+    catalog_name = ensure_catalog_exists(
+        ws,
+        catalog_name,
+        comment=catalog_comment,
+        create_if_missing=create_catalog_if_missing,
+    )
     full_schema_name = ensure_schema_exists(ws, catalog_name, schema_name, comment=schema_comment)
     return catalog_name, full_schema_name
 

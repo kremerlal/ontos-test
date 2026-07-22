@@ -10,7 +10,7 @@ Provides REST API endpoints for:
 - Impact analysis
 """
 
-from typing import Optional
+from typing import Annotated, Generator, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 
@@ -22,7 +22,8 @@ from src.common.authorization import PermissionChecker
 from src.common.features import FeatureAccessLevel
 from src.common.workspace_client import get_obo_workspace_client
 from src.common.config import get_settings, Settings
-from src.common.dependencies import DBSessionDep
+from src.common.database import get_db
+from src.common.storage_mode import StorageMode, resolve_storage_mode
 from src.controller.data_catalog_manager import DataCatalogManager
 from src.controller.data_contracts_manager import DataContractsManager
 from src.models.data_catalog import (
@@ -42,9 +43,21 @@ router = APIRouter(prefix="/api/data-catalog", tags=["Data Catalog"])
 DATA_CATALOG_FEATURE_ID = "data-catalog"
 
 
+def _get_optional_db() -> Generator[Optional[Session], None, None]:
+    """Yield no session in UC-only mode; otherwise delegate to app DB."""
+    settings = get_settings()
+    if resolve_storage_mode(settings) == StorageMode.UC_READONLY:
+        yield None
+        return
+    yield from get_db()
+
+
+OptionalDBSessionDep = Annotated[Optional[Session], Depends(_get_optional_db)]
+
+
 def _get_manager(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     obo_client: WorkspaceClient = Depends(get_obo_workspace_client),
 ) -> DataCatalogManager:
     """Helper to create manager with all dependencies."""
@@ -70,7 +83,7 @@ def _get_manager(
 )
 async def get_all_columns(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     catalog: Optional[str] = Query(None, description="Filter to specific catalog"),
     schema: Optional[str] = Query(None, description="Filter to specific schema"),
     table: Optional[str] = Query(None, description="Filter to specific table (FQN or name)"),
@@ -108,7 +121,7 @@ async def get_all_columns(
 )
 async def search_columns(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     q: str = Query(..., min_length=2, description="Search query (min 2 chars)"),
     catalog: Optional[str] = Query(None, description="Filter to specific catalog"),
     schema: Optional[str] = Query(None, description="Filter to specific schema"),
@@ -152,7 +165,7 @@ async def search_columns(
 )
 async def get_hierarchy_filters(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     obo_client: WorkspaceClient = Depends(get_obo_workspace_client),
 ) -> HierarchyFilters:
     """
@@ -179,7 +192,7 @@ async def get_hierarchy_filters(
 )
 async def get_table_list(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     catalog: Optional[str] = Query(None, description="Filter to specific catalog"),
     schema: Optional[str] = Query(None, description="Filter to specific schema"),
     obo_client: WorkspaceClient = Depends(get_obo_workspace_client),
@@ -200,7 +213,7 @@ async def get_table_list(
 )
 async def get_table_details(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     table_fqn: str,
     obo_client: WorkspaceClient = Depends(get_obo_workspace_client),
 ) -> TableInfo:
@@ -229,7 +242,7 @@ async def get_table_details(
 )
 async def get_table_lineage(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     table_fqn: str,
     direction: str = Query("both", regex="^(upstream|downstream|both)$"),
     obo_client: WorkspaceClient = Depends(get_obo_workspace_client),
@@ -250,7 +263,7 @@ async def get_table_lineage(
 )
 async def get_column_lineage(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     table_fqn: str,
     column_name: str,
     direction: str = Query("both", regex="^(upstream|downstream|both)$"),
@@ -276,7 +289,7 @@ async def get_column_lineage(
 )
 async def get_table_impact(
     request: Request,
-    db: DBSessionDep,
+    db: OptionalDBSessionDep,
     table_fqn: str,
     column: Optional[str] = Query(None, description="Optional column for column-level impact"),
     obo_client: WorkspaceClient = Depends(get_obo_workspace_client),

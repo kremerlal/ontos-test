@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from src.common.authorization import PermissionChecker
+from src.common.config import get_settings
 from src.common.database import get_db
 from src.common.dependencies import DirectoryManagerDep
 from src.common.features import FeatureAccessLevel
@@ -33,6 +34,7 @@ from src.models.directory import (
     SETTING_KEY_CONNECTION_NAME,
     SETTING_KEY_FILE_PATH,
     SETTING_KEY_LAKEBASE_TABLE,
+    SETTING_KEY_UC_TABLE,
     SETTING_KEY_PROVIDER_TYPE,
 )
 from src.repositories.app_settings_repository import app_settings_repo
@@ -59,7 +61,12 @@ def _build_context(request: Request, db: Session) -> DirectoryProviderContext:
         ws_client = None
 
     db_engine = db.get_bind() if db is not None else None
-    return DirectoryProviderContext(ws_client=ws_client, db_engine=db_engine)
+    settings = get_settings()
+    return DirectoryProviderContext(
+        ws_client=ws_client,
+        db_engine=db_engine,
+        warehouse_id=settings.DATABRICKS_WAREHOUSE_ID,
+    )
 
 
 @router.get("/status", response_model=DirectoryStatus)
@@ -147,6 +154,8 @@ async def update_settings(
         app_settings_repo.set(db, SETTING_KEY_CONNECTION_NAME, body.connection_name or None)
     if body.lakebase_table is not None:
         app_settings_repo.set(db, SETTING_KEY_LAKEBASE_TABLE, body.lakebase_table or None)
+    if body.uc_table is not None:
+        app_settings_repo.set(db, SETTING_KEY_UC_TABLE, body.uc_table or None)
     if body.file_path is not None:
         app_settings_repo.set(db, SETTING_KEY_FILE_PATH, body.file_path or None)
     manager.invalidate_cache()

@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     PGSCHEMA: Optional[str] = Field("public", validation_alias=AliasChoices('PGSCHEMA', 'POSTGRES_DB_SCHEMA'))
     LAKEBASE_INSTANCE_NAME: Optional[str] = None  # Instance name for Lakebase OAuth authentication
     DB_USE_PASSWORD_AUTH: bool = Field(False, env='DB_USE_PASSWORD_AUTH')  # Force password auth even in PROD mode (for deployments without Lakebase)
+    # Storage profile: lakebase | postgres | uc_readonly | uc_native
+    STORAGE_MODE: Optional[str] = Field(None, env='STORAGE_MODE')
+    APP_UC_APP_SCHEMA: str = Field("app_ontos", env='APP_UC_APP_SCHEMA')
+    APP_AUDIT_VOLUME_ONLY: bool = Field(False, env='APP_AUDIT_VOLUME_ONLY')
+    APP_UC_MIRROR_ENABLED: bool = Field(False, env='APP_UC_MIRROR_ENABLED')
+    APP_UC_MIRROR_SCHEMA: str = Field("uc_mirror", env='APP_UC_MIRROR_SCHEMA')
+    APP_UC_MIRROR_INTERVAL_SECONDS: int = Field(
+        3600, env='APP_UC_MIRROR_INTERVAL_SECONDS'
+    )
     
     # Database connection pool settings
     DB_POOL_SIZE: int = Field(5, env='DB_POOL_SIZE')  # Base connection pool size

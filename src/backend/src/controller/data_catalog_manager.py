@@ -59,7 +59,7 @@ class DataCatalogManager:
     def __init__(
         self,
         obo_client: WorkspaceClient,
-        db_session: Session,
+        db_session: Optional[Session],
         contracts_manager: Optional[DataContractsManager] = None,
         settings: Optional[Settings] = None
     ):

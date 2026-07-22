@@ -31,7 +31,7 @@ from src.controller.directory_providers import (
     DirectoryProviderContext,
     EntraIdProvider,
     FileProvider,
-    LakebaseProvider,
+    UnityCatalogProvider,
 )
 from src.models.directory import (
     DirectoryProviderType,
@@ -40,6 +40,7 @@ from src.models.directory import (
     SETTING_KEY_CONNECTION_NAME,
     SETTING_KEY_FILE_PATH,
     SETTING_KEY_LAKEBASE_TABLE,
+    SETTING_KEY_UC_TABLE,
     SETTING_KEY_PROVIDER_TYPE,
 )
 from src.repositories.app_settings_repository import app_settings_repo
@@ -60,7 +61,7 @@ ProviderFactory = Callable[
 ]
 _PROVIDER_REGISTRY: Dict[str, ProviderFactory] = {
     DirectoryProviderType.ENTRA.value: EntraIdProvider,
-    DirectoryProviderType.LAKEBASE.value: LakebaseProvider,
+    DirectoryProviderType.UNITY_CATALOG.value: UnityCatalogProvider,
     DirectoryProviderType.FILE.value: FileProvider,
 }
 
@@ -70,7 +71,7 @@ _PROVIDER_REGISTRY: Dict[str, ProviderFactory] = {
 # the provider.
 _REQUIRED_KEYS: Dict[str, Tuple[str, ...]] = {
     DirectoryProviderType.ENTRA.value: (SETTING_KEY_CONNECTION_NAME,),
-    DirectoryProviderType.LAKEBASE.value: (SETTING_KEY_LAKEBASE_TABLE,),
+    DirectoryProviderType.UNITY_CATALOG.value: (SETTING_KEY_UC_TABLE,),
     DirectoryProviderType.FILE.value: (SETTING_KEY_FILE_PATH,),
 }
 
@@ -104,6 +105,7 @@ class DirectoryManager:
             provider_type=provider_type or None,
             connection_name=config.connection_name,
             lakebase_table=config.lakebase_table,
+            uc_table=config.uc_table,
             file_path=config.file_path,
         )
 
@@ -191,6 +193,7 @@ class DirectoryManager:
         config = DirectoryProviderConfig(
             connection_name=app_settings_repo.get_by_key(db, SETTING_KEY_CONNECTION_NAME) or None,
             lakebase_table=app_settings_repo.get_by_key(db, SETTING_KEY_LAKEBASE_TABLE) or None,
+            uc_table=app_settings_repo.get_by_key(db, SETTING_KEY_UC_TABLE) or None,
             file_path=app_settings_repo.get_by_key(db, SETTING_KEY_FILE_PATH) or None,
         )
         return (provider_type or None), config
@@ -205,6 +208,7 @@ class DirectoryManager:
         key_to_field = {
             SETTING_KEY_CONNECTION_NAME: "connection_name",
             SETTING_KEY_LAKEBASE_TABLE: "lakebase_table",
+            SETTING_KEY_UC_TABLE: "uc_table",
             SETTING_KEY_FILE_PATH: "file_path",
         }
         for key in required:

@@ -29,6 +29,9 @@ from src.controller.directory_providers.file_provider import FileProvider
 from src.controller.directory_providers.lakebase_provider import (
     LakebaseProvider,
 )
+from src.controller.directory_providers.unity_catalog_provider import (
+    UnityCatalogProvider,
+)
 
 __all__ = [
     "DirectoryError",
@@ -38,4 +41,5 @@ __all__ = [
     "EntraIdProvider",
     "FileProvider",
     "LakebaseProvider",
+    "UnityCatalogProvider",
 ]

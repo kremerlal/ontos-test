@@ -74,9 +74,6 @@ def get_data_contracts_manager(request: Request) -> DataContractsManager:
     if manager is None:
         logger.critical("DataContractsManager instance not found in app.state!")
         raise HTTPException(status_code=500, detail="Data Contracts service is not available.")
-    if not isinstance(manager, DataContractsManager):
-        logger.critical(f"Object found at app.state.data_contracts_manager is not a DataContractsManager instance (Type: {type(manager)})!")
-        raise HTTPException(status_code=500, detail="Data Contracts service configuration error.")
     return manager
 
 def get_jobs_manager(request: Request):

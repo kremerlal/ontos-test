@@ -31,6 +31,7 @@ export interface DirectoryStatus {
   /** Provider-specific config; most fields are null depending on provider_type. */
   connection_name: string | null;
   lakebase_table?: string | null;
+  uc_table?: string | null;
   file_path?: string | null;
 }
 
@@ -47,6 +48,7 @@ export interface DirectorySettingsUpdate {
   provider_type?: string | null;
   connection_name?: string | null;
   lakebase_table?: string | null;
+  uc_table?: string | null;
   file_path?: string | null;
 }
 
@@ -64,5 +66,10 @@ export interface UcHttpConnection {
  * additional entries here will be rendered disabled in the Settings
  * tab to telegraph the abstraction.
  */
-export const DIRECTORY_PROVIDER_TYPES = ['entra', 'lakebase', 'file'] as const;
+export const DIRECTORY_PROVIDER_TYPES = [
+  'entra',
+  'unity_catalog',
+  'lakebase',
+  'file',
+] as const;
 export type DirectoryProviderType = (typeof DIRECTORY_PROVIDER_TYPES)[number];

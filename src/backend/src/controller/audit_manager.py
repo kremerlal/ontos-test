@@ -71,10 +71,10 @@ class AuditManager:
 
     def _log_action_internal(
         self,
-        db: Session,
+        db: Optional[Session],
         log_entry_data: Dict[str, Any]
     ):
-        """Internal synchronous logic to log to file and DB using a given session."""
+        """Internal synchronous logic to log to file and optionally DB."""
         # 1. Log to file (structured as JSON string)
         if not file_audit_logger.disabled:
             try:
@@ -91,7 +91,9 @@ class AuditManager:
                 main_logger = get_logger(__name__)
                 main_logger.error(f"Failed to write audit log to file: {e}", exc_info=True)
 
-        # 2. Log to database
+        # 2. Log to database (optional when APP_AUDIT_VOLUME_ONLY or no session)
+        if getattr(self.settings, "APP_AUDIT_VOLUME_ONLY", False) or db is None:
+            return
         try:
             log_entry = AuditLogCreate(**log_entry_data)
             self.repository.create(db=db, obj_in=log_entry)
@@ -116,11 +118,6 @@ class AuditManager:
     ):
         """Logs an action synchronously using an INDEPENDENT DB session with auto-commit."""
         session_factory = get_session_factory()
-        if not session_factory:
-            main_logger = get_logger(__name__)
-            main_logger.error("Cannot log audit action: DB session factory not available.")
-            return
-
         log_entry_data = {
             "username": username,
             "ip_address": ip_address,
@@ -130,9 +127,12 @@ class AuditManager:
             "details": details or {},
         }
 
+        if not session_factory or getattr(self.settings, "APP_AUDIT_VOLUME_ONLY", False):
+            self._log_action_internal(db=None, log_entry_data=log_entry_data)
+            return
+
         try:
             with session_factory() as independent_db:
-                # Use the internal logging logic which commits
                 self._log_action_internal(db=independent_db, log_entry_data=log_entry_data)
         except Exception as e:
             main_logger = get_logger(__name__)

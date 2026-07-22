@@ -59,7 +59,11 @@ conceptually:
 
 #### Prerequisites {#install-prerequisites}
 
-- A **Lakebase Postgres** instance the deployment can claim. The
+- A **PostgreSQL database** for operational app metadata. This is typically
+  **Lakebase Postgres** on Databricks; customers without Lakebase can use
+  **`STORAGE_MODE=uc_native`** (UC Delta, no Postgres) or external Postgres — see
+  [Deploying without Lakebase](deploying-without-lakebase.md).
+- A **Lakebase Postgres** instance the deployment can claim (Lakebase path). The
   database (`app_ontos` by default) must be created with a permissive
   initial grant (`GRANT ALL ON DATABASE app_ontos TO PUBLIC`) because
   the app's service principal does not yet exist at create time. The

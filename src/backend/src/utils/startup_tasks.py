@@ -148,10 +148,37 @@ def initialize_managers(app: FastAPI):
     """Initializes and stores manager instances directly in app.state."""
     logger.info("Initializing manager singletons...")
     settings = get_settings()
-    session_factory = get_session_factory() # Assumes DB is initialized
-    db_session = None
-    ws_client = None
+    from src.common.storage_mode import (
+        requires_oltp_database,
+        resolve_storage_mode,
+        StorageMode,
+    )
 
+    storage_mode = resolve_storage_mode(settings)
+    health = getattr(app.state, 'health', {"warnings": []})
+
+    if storage_mode == StorageMode.UC_NATIVE:
+        from src.common.uc_native.startup import initialize_uc_native
+
+        logger.info("UC native mode: initializing Delta-backed managers")
+        initialize_uc_native(app, settings)
+        app.state.managers = {}
+        return
+
+    if not requires_oltp_database(storage_mode):
+        logger.info("UC read-only mode: initializing workspace client only (no OLTP managers)")
+        app.state.settings = settings
+        try:
+            ws_client = get_workspace_client(settings=settings)
+            health["ws_ok"] = ws_client is not None
+            app.state.ws_client = ws_client
+        except Exception as ws_err:
+            health["ws_ok"] = False
+            health.setdefault("warnings", []).append(f"Workspace client unavailable: {ws_err}")
+        app.state.managers = {}
+        return
+
+    session_factory = get_session_factory() # Assumes DB is initialized
     # Access health state for soft-fail reporting (set in app.py startup_event)
     health = getattr(app.state, 'health', {"warnings": []})
 

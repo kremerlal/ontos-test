@@ -472,31 +472,50 @@ class JobsManager:
         # Inject system-level database connection parameters from settings
         # These are required for workflows that connect to the app's database
         if self._settings:
-            # Get Lakebase identifier from app resources (same as database.py)
-            lakebase_instance = ''
-            try:
-                from src.common.database import get_lakebase_info
-                app_name = getattr(self._settings, 'DATABRICKS_APP_NAME', None)
-                if app_name and self._client:
-                    info = get_lakebase_info(app_name, self._client)
-                    if info:
-                        lakebase_instance = info.identifier
-                        logger.info(f"Auto-detected Lakebase ({info.lakebase_type}): {lakebase_instance}")
-                if not lakebase_instance:
-                    logger.warning(f"Could not auto-detect Lakebase info for app '{app_name}'")
-            except Exception as e:
-                logger.warning(f"Failed to get Lakebase info: {e}")
-            
-            db_params = {
-                'lakebase_instance_name': lakebase_instance,
-                'postgres_host': str(getattr(self._settings, 'PGHOST', '') or ''),
-                'postgres_db': str(getattr(self._settings, 'PGDATABASE', '') or ''),
-                'postgres_port': str(getattr(self._settings, 'PGPORT', '5432') or '5432'),
-                'postgres_schema': str(getattr(self._settings, 'PGSCHEMA', 'public') or 'public'),
-                # Telemetry parameters for WorkspaceClient identification
-                'product_name': 'ontos',
-                'product_version': __version__,
-            }
+            from src.common.storage_mode import StorageMode, resolve_storage_mode
+
+            storage_mode = resolve_storage_mode(self._settings)
+            if storage_mode == StorageMode.UC_NATIVE:
+                db_params = {
+                    "storage_mode": StorageMode.UC_NATIVE.value,
+                    "uc_app_schema": str(
+                        getattr(self._settings, "APP_UC_APP_SCHEMA", "app_ontos") or "app_ontos"
+                    ),
+                    "uc_catalog": str(getattr(self._settings, "DATABRICKS_CATALOG", "") or ""),
+                    "uc_schema": str(getattr(self._settings, "DATABRICKS_SCHEMA", "") or ""),
+                    "product_name": "ontos",
+                    "product_version": __version__,
+                }
+            else:
+                # Get Lakebase identifier from app resources (same as database.py)
+                lakebase_instance = ''
+                try:
+                    from src.common.database import get_lakebase_info
+                    app_name = getattr(self._settings, 'DATABRICKS_APP_NAME', None)
+                    if app_name and self._client:
+                        info = get_lakebase_info(app_name, self._client)
+                        if info:
+                            lakebase_instance = info.identifier
+                            logger.info(f"Auto-detected Lakebase ({info.lakebase_type}): {lakebase_instance}")
+                    if not lakebase_instance:
+                        logger.warning(f"Could not auto-detect Lakebase info for app '{app_name}'")
+                except Exception as e:
+                    logger.warning(f"Failed to get Lakebase info: {e}")
+
+                db_params = {
+                    'lakebase_instance_name': lakebase_instance,
+                    'postgres_host': str(getattr(self._settings, 'PGHOST', '') or ''),
+                    'postgres_db': str(getattr(self._settings, 'PGDATABASE', '') or ''),
+                    'postgres_port': str(getattr(self._settings, 'PGPORT', '5432') or '5432'),
+                    'postgres_schema': str(getattr(self._settings, 'PGSCHEMA', 'public') or 'public'),
+                    'db_use_password_auth': str(
+                        getattr(self._settings, 'DB_USE_PASSWORD_AUTH', False)
+                    ).lower(),
+                    'storage_mode': str(getattr(self._settings, 'STORAGE_MODE', '') or ''),
+                    # Telemetry parameters for WorkspaceClient identification
+                    'product_name': 'ontos',
+                    'product_version': __version__,
+                }
             # Only inject if workflow YAML defines these parameters
             try:
                 wf_def = self._get_workflow_definition(workflow_id, job_cluster_id=None)

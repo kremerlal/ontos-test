@@ -4,15 +4,13 @@ env:
   - name: "ENV"
     value: "PROD"
   - name: "STORAGE_MODE"
-    value: "uc_native"
+    value: "uc_readonly"
   - name: "APP_DEMO_MODE"
     value: "false"
   - name: "APP_AUDIT_VOLUME_ONLY"
     value: "true"
   - name: "APP_UC_MIRROR_ENABLED"
-    value: "false"
-  - name: "APP_UC_APP_SCHEMA"
-    value: "app_ontos"
+    value: "true"
 
   - name: "PYTHONPATH"
     value: "./backend:${PYTHONPATH}"
@@ -27,7 +25,7 @@ env:
     valueFrom: "volume"
 
   - name: "APP_ADMIN_DEFAULT_GROUPS"
-    value: '["admins", "users"]'
+    value: '["admins"]'
   - name: "APP_AUDIT_LOG_DIR"
     value: "/Volumes/${workspace.env.DATABRICKS_CATALOG}/${workspace.env.DATABRICKS_SCHEMA}/${workspace.env.DATABRICKS_VOLUME}/audit_logs"
 

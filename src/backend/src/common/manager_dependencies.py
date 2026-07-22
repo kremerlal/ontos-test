@@ -44,16 +44,57 @@ logger = get_logger(__name__)
 def get_settings_manager(request: Request) -> SettingsManager:
     manager = getattr(request.app.state, 'settings_manager', None)
     if not manager:
+        from src.common.config import get_settings
+        from src.common.storage_mode import StorageMode, resolve_storage_mode
+
+        if resolve_storage_mode(get_settings()) == StorageMode.UC_NATIVE:
+            logger.critical("UcNativeSettingsManager not found in application state!")
+            raise HTTPException(status_code=503, detail="Settings service not configured.")
         logger.critical("SettingsManager not found in application state during request!")
         raise HTTPException(status_code=503, detail="Settings service not configured.")
     return manager
 
 def get_auth_manager(request: Request) -> AuthorizationManager:
-    manager = getattr(request.app.state, "authorization_manager", None) # Corrected attribute name
-    if not manager:
-        logger.critical("AuthorizationManager not found in application state during request!")
-        raise HTTPException(status_code=503, detail="Authorization service not configured.")
-    return manager
+    manager = getattr(request.app.state, "authorization_manager", None)
+    if manager:
+        return manager
+
+    from src.common.config import get_settings
+    from src.common.features import FeatureAccessLevel
+    from src.common.storage_mode import StorageMode, resolve_storage_mode
+
+    mode = resolve_storage_mode(get_settings())
+    if mode == StorageMode.UC_READONLY:
+
+        class _UcReadOnlyAuthorizationManager:
+            """Minimal RBAC adapter for uc_readonly deployments."""
+
+            _SAFE_FEATURES = {
+                "catalog-commander",
+                "data-catalog",
+                "schema-importer",
+            }
+
+            def get_user_effective_permissions(self, *_args, **_kwargs):
+                return {
+                    feature: FeatureAccessLevel.READ_ONLY
+                    for feature in self._SAFE_FEATURES
+                }
+
+            def has_permission(self, permissions, feature_id, required_level):
+                return (
+                    feature_id in self._SAFE_FEATURES
+                    and required_level == FeatureAccessLevel.READ_ONLY
+                    and permissions.get(feature_id)
+                    == FeatureAccessLevel.READ_ONLY
+                )
+
+        manager = _UcReadOnlyAuthorizationManager()
+        setattr(request.app.state, "authorization_manager", manager)
+        return manager
+
+    logger.critical("AuthorizationManager not found in application state during request!")
+    raise HTTPException(status_code=503, detail="Authorization service not configured.")
 
 def get_users_manager(request: Request) -> UsersManager:
     manager = getattr(request.app.state, "users_manager", None)

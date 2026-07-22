@@ -51,9 +51,6 @@ def get_semantic_models_manager(request: Request) -> SemanticModelsManager:
     if manager is None:
         logger.critical("SemanticModelsManager instance not found in app.state!")
         raise HTTPException(status_code=500, detail="Semantic Models service is not available.")
-    if not isinstance(manager, SemanticModelsManager):
-        logger.critical(f"Object found at app.state.semantic_models_manager is not a SemanticModelsManager instance (Type: {type(manager)})!")
-        raise HTTPException(status_code=500, detail="Semantic Models service configuration error.")
     return manager
 
 # --- Semantic Models endpoints ---

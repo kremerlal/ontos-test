@@ -284,6 +284,11 @@ db_manager: Optional[DatabaseManager] = None
 
 def refresh_oauth_token(settings: Settings) -> str:
     """Generate fresh OAuth token from Databricks for Lakebase connection."""
+    from src.common.storage_mode import uses_lakebase_oauth
+
+    if not uses_lakebase_oauth(settings):
+        raise ValueError("OAuth token refresh is only used in Lakebase storage mode")
+
     global _oauth_token, _token_last_refresh
     
     with _token_refresh_lock:
@@ -362,7 +367,14 @@ def stop_token_refresh_background():
 
 def _use_password_auth(settings: Settings) -> bool:
     """Determine if password auth should be used for the database.
-    True when ENV=LOCAL or when DB_USE_PASSWORD_AUTH is explicitly set."""
+
+    True when ENV=LOCAL, DB_USE_PASSWORD_AUTH is set, or STORAGE_MODE=postgres.
+    """
+    from src.common.storage_mode import StorageMode, resolve_storage_mode
+
+    mode = resolve_storage_mode(settings)
+    if mode == StorageMode.POSTGRES:
+        return True
     return settings.ENV.upper().startswith("LOCAL") or settings.DB_USE_PASSWORD_AUTH
 
 
@@ -382,6 +394,15 @@ def get_db_url(settings: Settings) -> str:
         username = settings.PGUSER
         password = settings.PGPASSWORD
     else:
+        from src.common.storage_mode import uses_lakebase_oauth
+
+        if not uses_lakebase_oauth(settings):
+            raise ValueError(
+                "Lakebase OAuth is not enabled for this deployment "
+                f"(STORAGE_MODE={getattr(settings, 'STORAGE_MODE', None)!r}). "
+                "Set DB_USE_PASSWORD_AUTH=true and PG* connection variables, "
+                "or configure Lakebase app resources."
+            )
         logger.info("Database: Using OAuth authentication (Lakebase mode)")
         # Dynamically determine username from authenticated principal
         ws_client = get_workspace_client(settings)
@@ -752,7 +773,7 @@ def init_db() -> None:
             start_token_refresh_background(settings)
             logger.info("OAuth authentication configured successfully")
         else:
-            logger.info("Password authentication configured for LOCAL mode")
+            logger.info("Password authentication configured (external Postgres / LOCAL)")
 
         # Explicitly enforce search_path at connection time to ensure correct schema usage in environments
         # where connection options may be ignored.

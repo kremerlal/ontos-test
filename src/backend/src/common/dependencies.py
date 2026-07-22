@@ -63,10 +63,53 @@ from src.common.workspace_client import get_workspace_client_dependency  # Fixed
 
 logger = get_logger(__name__)
 
+
+class _NoOpDbSession:
+    """Placeholder session for uc_native mode when Postgres is not configured."""
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def add(self, *_args, **_kwargs) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+    def refresh(self, *_args, **_kwargs) -> None:
+        return None
+
+    def query(self, *_args, **_kwargs):
+        return self
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def one_or_none(self):
+        return None
+
+    def all(self):
+        return []
+
+
 # --- Core Dependency Functions --- #
 
 # Database Session Dependency Provider (Function)
-def get_db():
+def get_db(request: Request):
+    from src.common.config import get_settings as load_settings
+    from src.common.storage_mode import StorageMode, resolve_storage_mode
+
+    settings = getattr(request.app.state, "settings", None) or load_settings()
+    if resolve_storage_mode(settings) == StorageMode.UC_NATIVE:
+        yield _NoOpDbSession()
+        return
+
     session_factory = get_session_factory() # Get the factory
     if not session_factory:
         # This should ideally not happen if init_db ran successfully
@@ -217,14 +260,11 @@ AuditCurrentUserDep = Annotated[UserInfo, Depends(get_current_user_details_for_a
 # DataProductsManagerDep = Annotated[DataProductsManager, Depends(get_data_products_manager)]
 
 # --- TagsManager Dependency ---
-async def get_tags_manager(request: Request) -> TagsManager:
+async def get_tags_manager(request: Request):
     manager = getattr(request.app.state, 'tags_manager', None)
     if manager is None:
         logger.critical("TagsManager instance not found in app.state!")
         raise HTTPException(status_code=500, detail="Tags service is not available.")
-    if not isinstance(manager, TagsManager):
-        logger.critical(f"Object found at app.state.tags_manager is not a TagsManager instance (Type: {type(manager)})!")
-        raise HTTPException(status_code=500, detail="Tags service configuration error.")
     return manager
 
 # Type alias for dependency injection

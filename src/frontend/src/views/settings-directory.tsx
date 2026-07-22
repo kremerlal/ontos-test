@@ -42,12 +42,13 @@ import type {
 // Provider options enabled in v1. Adding a new one only requires
 // extending this array and the form-state below; the manager picks
 // the provider up via its registry on the backend.
-const PROVIDER_OPTIONS: Array<{
-  value: 'entra' | 'lakebase' | 'file';
+const ALL_PROVIDER_OPTIONS: Array<{
+  value: 'entra' | 'unity_catalog' | 'lakebase' | 'file';
   label: string;
 }> = [
   { value: 'entra', label: 'Microsoft Entra ID' },
-  { value: 'lakebase', label: 'Lakebase table' },
+  { value: 'unity_catalog', label: 'Unity Catalog table' },
+  { value: 'lakebase', label: 'Postgres table (legacy Lakebase)' },
   { value: 'file', label: 'CSV file (test / demo)' },
 ];
 
@@ -66,6 +67,13 @@ const LAKEBASE_SCHEMA_SQL = `CREATE TABLE main.directory.principals (
 );
 CREATE INDEX ON main.directory.principals (LOWER(display_name));
 CREATE INDEX ON main.directory.principals (LOWER(id));`;
+
+const UC_SCHEMA_SQL = `CREATE TABLE main.directory.principals (
+  type         STRING NOT NULL,
+  id           STRING NOT NULL,
+  display_name STRING NOT NULL,
+  sub_label    STRING
+) USING DELTA;`;
 
 const FILE_HELP_CSV = `type,id,display_name,sub_label
 user,alice@example.com,Alice Liddell,alice@example.com
@@ -87,17 +95,27 @@ export default function SettingsDirectoryView() {
   const [providerType, setProviderType] = useState<string>('');
   const [connectionName, setConnectionName] = useState<string>('');
   const [lakebaseTable, setLakebaseTable] = useState<string>('');
+  const [ucTable, setUcTable] = useState<string>('');
   const [filePath, setFilePath] = useState<string>('');
 
   const [status, setStatus] = useState<DirectoryStatus | null>(null);
   const [connections, setConnections] = useState<UcHttpConnection[]>([]);
   const [connectionsLoading, setConnectionsLoading] = useState(false);
+  const [ucNativeMode, setUcNativeMode] = useState(false);
+
+  const providerOptions = useMemo(
+    () =>
+      ucNativeMode
+        ? ALL_PROVIDER_OPTIONS.filter((opt) => opt.value !== 'lakebase')
+        : ALL_PROVIDER_OPTIONS,
+    [ucNativeMode],
+  );
 
   // Initial load
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [statusRes, connsRes] = await Promise.all([
+      const [statusRes, connsRes, capsRes] = await Promise.all([
         get<DirectoryStatus>('/api/directory/status'),
         (async () => {
           setConnectionsLoading(true);
@@ -107,13 +125,18 @@ export default function SettingsDirectoryView() {
             if (!cancelled) setConnectionsLoading(false);
           }
         })(),
+        get<{ uc_native_sor?: boolean }>('/api/storage/capabilities'),
       ]);
       if (cancelled) return;
+      if (capsRes.data?.uc_native_sor) {
+        setUcNativeMode(true);
+      }
       if (statusRes.data && !statusRes.error) {
         setStatus(statusRes.data);
         setProviderType(statusRes.data.provider_type ?? '');
         setConnectionName(statusRes.data.connection_name ?? '');
         setLakebaseTable(statusRes.data.lakebase_table ?? '');
+        setUcTable(statusRes.data.uc_table ?? '');
         setFilePath(statusRes.data.file_path ?? '');
       }
       if (connsRes.data && Array.isArray(connsRes.data)) {
@@ -130,9 +153,10 @@ export default function SettingsDirectoryView() {
     if (providerType !== (status?.provider_type ?? '')) return true;
     if (connectionName !== (status?.connection_name ?? '')) return true;
     if (lakebaseTable !== (status?.lakebase_table ?? '')) return true;
+    if (ucTable !== (status?.uc_table ?? '')) return true;
     if (filePath !== (status?.file_path ?? '')) return true;
     return false;
-  }, [providerType, connectionName, lakebaseTable, filePath, status]);
+  }, [providerType, connectionName, lakebaseTable, ucTable, filePath, status]);
 
   const canSave = !saving && dirty;
   const canTest = !!status?.configured && !testing && !dirty;
@@ -144,6 +168,7 @@ export default function SettingsDirectoryView() {
         provider_type: providerType || null,
         connection_name: connectionName || null,
         lakebase_table: lakebaseTable || null,
+        uc_table: ucTable || null,
         file_path: filePath || null,
       };
       const res = await put<DirectoryStatus>('/api/directory/settings', body);
@@ -194,6 +219,7 @@ export default function SettingsDirectoryView() {
         provider_type: null,
         connection_name: null,
         lakebase_table: null,
+        uc_table: null,
         file_path: null,
       };
       const res = await put<DirectoryStatus>('/api/directory/settings', body);
@@ -202,6 +228,7 @@ export default function SettingsDirectoryView() {
       setProviderType('');
       setConnectionName('');
       setLakebaseTable('');
+      setUcTable('');
       setFilePath('');
       await refreshStore();
       toast({ title: 'Directory settings cleared' });
@@ -248,6 +275,14 @@ export default function SettingsDirectoryView() {
             saving={saving}
           />
         );
+      case 'unity_catalog':
+        return (
+          <UnityCatalogPanel
+            ucTable={ucTable}
+            setUcTable={setUcTable}
+            saving={saving}
+          />
+        );
       case 'file':
         return (
           <FilePanel
@@ -278,7 +313,7 @@ export default function SettingsDirectoryView() {
               <SelectValue placeholder="Select a provider…" />
             </SelectTrigger>
             <SelectContent>
-              {PROVIDER_OPTIONS.map((opt) => (
+              {providerOptions.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
                   {opt.label}
                 </SelectItem>
@@ -301,7 +336,7 @@ export default function SettingsDirectoryView() {
           <Button
             variant="ghost"
             onClick={handleClear}
-            disabled={saving || (!status?.provider_type && !status?.connection_name && !status?.lakebase_table && !status?.file_path)}
+            disabled={saving || (!status?.provider_type && !status?.connection_name && !status?.lakebase_table && !status?.uc_table && !status?.file_path)}
           >
             Clear
           </Button>
@@ -434,6 +469,43 @@ function LakebasePanel({
           </p>
           <pre className="mt-2 text-xs bg-muted/50 rounded-md p-2 overflow-x-auto">
             {LAKEBASE_SCHEMA_SQL}
+          </pre>
+        </AlertDescription>
+      </Alert>
+    </>
+  );
+}
+
+function UnityCatalogPanel({
+  ucTable,
+  setUcTable,
+  saving,
+}: {
+  ucTable: string;
+  setUcTable: (v: string) => void;
+  saving: boolean;
+}) {
+  return (
+    <>
+      <div className="grid gap-2">
+        <Label htmlFor="directory-uc-table">Unity Catalog table</Label>
+        <Input
+          id="directory-uc-table"
+          value={ucTable}
+          onChange={(e) => setUcTable(e.target.value)}
+          placeholder="catalog.schema.principals"
+          disabled={saving}
+        />
+        <p className="text-xs text-muted-foreground">
+          Fully-qualified Delta table queried through the configured SQL
+          warehouse. This provider does not require Lakebase.
+        </p>
+      </div>
+      <Alert>
+        <AlertTitle>Required schema</AlertTitle>
+        <AlertDescription>
+          <pre className="mt-2 text-xs bg-muted/50 rounded-md p-2 overflow-x-auto">
+            {UC_SCHEMA_SQL}
           </pre>
         </AlertDescription>
       </Alert>

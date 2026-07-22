@@ -53,14 +53,11 @@ DATA_PRODUCTS_FEATURE_ID = "data-products"
 
 def get_data_products_manager(
     request: Request # Inject Request
-) -> DataProductsManager:
+):
     manager = getattr(request.app.state, 'data_products_manager', None)
     if manager is None:
          logger.critical("DataProductsManager instance not found in app.state!")
          raise HTTPException(status_code=500, detail="Data Products service is not available.")
-    if not isinstance(manager, DataProductsManager):
-        logger.critical(f"Object found at app.state.data_products_manager is not a DataProductsManager instance (Type: {type(manager)})!")
-        raise HTTPException(status_code=500, detail="Data Products service configuration error.")
     return manager
 
 
