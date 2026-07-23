@@ -232,6 +232,106 @@ class UcNativeSemanticModelsManager:
                 grouped[source] = props
         return grouped
 
+    @staticmethod
+    def _detect_concept_type(context, concept_uri: URIRef) -> tuple[str, Optional[str]]:
+        types = {str(t) for t in context.objects(concept_uri, RDF.type)}
+        if str(OWL.ObjectProperty) in types:
+            return "property", "object"
+        if str(OWL.DatatypeProperty) in types:
+            return "property", "datatype"
+        if str(OWL.AnnotationProperty) in types or str(RDF.Property) in types:
+            return "property", "annotation"
+        if str(SKOS.Concept) in types:
+            return "concept", None
+        if str(OWL.Class) in types or str(RDFS.Class) in types:
+            return "class", None
+        return "individual", None
+
+    def get_concept_details(self, concept_iri: str) -> Optional[OntologyConcept]:
+        """Return details for a concept IRI from the in-memory graph."""
+        concept_uri = URIRef(concept_iri)
+        for context in self._graph.contexts():
+            if not hasattr(context, "identifier"):
+                continue
+            if (concept_uri, None, None) not in context:
+                continue
+            context_name = str(context.identifier)
+            source = _extract_source_context(context_name)
+
+            labels = list(context.objects(concept_uri, RDFS.label))
+            labels.extend(list(context.objects(concept_uri, SKOS.prefLabel)))
+            label = str(labels[0]) if labels else _local_name(concept_iri)
+
+            comments = list(context.objects(concept_uri, RDFS.comment))
+            comments.extend(list(context.objects(concept_uri, SKOS.definition)))
+            comment = str(comments[0]) if comments else None
+
+            concept_type, property_type = self._detect_concept_type(context, concept_uri)
+
+            parent_concepts: List[str] = []
+            for parent in context.objects(concept_uri, RDFS.subClassOf):
+                if isinstance(parent, URIRef):
+                    parent_concepts.append(str(parent))
+            for parent in context.objects(concept_uri, SKOS.broader):
+                if isinstance(parent, URIRef):
+                    parent_concepts.append(str(parent))
+
+            child_concepts: List[str] = []
+            for child in context.subjects(RDFS.subClassOf, concept_uri):
+                if isinstance(child, URIRef):
+                    child_concepts.append(str(child))
+            for child in context.subjects(SKOS.broader, concept_uri):
+                if isinstance(child, URIRef):
+                    child_concepts.append(str(child))
+
+            related = [str(o) for o in context.objects(concept_uri, SKOS.related) if isinstance(o, URIRef)]
+            synonyms = [str(o) for o in context.objects(concept_uri, SKOS.altLabel) if isinstance(o, Literal)]
+            domain = next(
+                (str(o) for o in context.objects(concept_uri, RDFS.domain) if isinstance(o, URIRef)),
+                None,
+            )
+            range_ = next(
+                (str(o) for o in context.objects(concept_uri, RDFS.range) if isinstance(o, URIRef)),
+                None,
+            )
+
+            return OntologyConcept(
+                iri=concept_iri,
+                label=label,
+                comment=comment,
+                concept_type=concept_type,
+                property_type=property_type,
+                source_context=source,
+                parent_concepts=parent_concepts,
+                child_concepts=child_concepts,
+                related_concepts=related,
+                synonyms=synonyms,
+                domain=domain,
+                range=range_,
+            )
+        return None
+
+    def get_concept_hierarchy(self, concept_iri: str):
+        from src.models.ontology import ConceptHierarchy
+
+        concept = self.get_concept_details(concept_iri)
+        if not concept:
+            return None
+        ancestors = [
+            self.get_concept_details(iri) or OntologyConcept(iri=iri, concept_type="class")
+            for iri in concept.parent_concepts
+        ]
+        descendants = [
+            self.get_concept_details(iri) or OntologyConcept(iri=iri, concept_type="class")
+            for iri in concept.child_concepts
+        ]
+        return ConceptHierarchy(
+            concept=concept,
+            ancestors=[a for a in ancestors if a],
+            descendants=[d for d in descendants if d],
+            siblings=[],
+        )
+
     def list_models(self, db=None, **_) -> List[Dict[str, Any]]:
         return self._semantic.search_triples("", limit=200)
 

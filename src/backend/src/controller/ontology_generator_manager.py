@@ -32,6 +32,33 @@ logger = get_logger(__name__)
 MAX_ITERATIONS = 10
 _MAX_TABLES_IN_METADATA = 50
 _MAX_COLUMNS_PER_TABLE = 80
+MAX_CONCURRENT_RUNS_PER_USER = 3
+
+
+@dataclass
+class _MemoryRun:
+    """In-process generation run used when Postgres is unavailable (uc_native)."""
+
+    id: str
+    user_id: str
+    status: str = "pending"
+    progress_message: Optional[str] = None
+    error: Optional[str] = None
+    connection_id: Optional[str] = None
+    connection_name: Optional[str] = None
+    selected_paths: Optional[List[str]] = None
+    guidelines: Optional[str] = None
+    base_uri: Optional[str] = None
+    options: Optional[dict] = None
+    steps: Optional[list] = None
+    result: Optional[dict] = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
+
+
+def _is_noop_db(db) -> bool:
+    return db is None or type(db).__name__ == "_NoOpDbSession"
 
 
 # =====================================================================
@@ -195,8 +222,6 @@ TOOL_HANDLERS = {
 # Manager
 # =====================================================================
 
-MAX_CONCURRENT_RUNS_PER_USER = 3
-
 
 class OntologyGeneratorManager:
     """Generates OWL ontologies from metadata using an LLM agent loop."""
@@ -204,6 +229,7 @@ class OntologyGeneratorManager:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._cancel_events: Dict[str, threading.Event] = {}
+        self._memory_runs: Dict[str, _MemoryRun] = {}
         self._lock = threading.Lock()
 
     def _get_openai_client(self, user_token: Optional[str] = None):
@@ -620,10 +646,22 @@ class OntologyGeneratorManager:
 
         Returns the run_id immediately.  Raises ValueError if the user has
         hit the concurrent-run cap.
+
+        When Postgres is unavailable (uc_native / NoOp DB), runs are kept in
+        process memory so generate + poll still work for the current app instance.
         """
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
 
-        running = ontology_generation_runs_repo.count_running_for_user(db, user_id)
+        use_memory = _is_noop_db(db)
+        if use_memory:
+            with self._lock:
+                running = sum(
+                    1
+                    for run in self._memory_runs.values()
+                    if run.user_id == user_id and run.status in ("pending", "running")
+                )
+        else:
+            running = ontology_generation_runs_repo.count_running_for_user(db, user_id)
         if running >= MAX_CONCURRENT_RUNS_PER_USER:
             raise ValueError(
                 f"Concurrent run limit reached ({MAX_CONCURRENT_RUNS_PER_USER}). "
@@ -633,19 +671,35 @@ class OntologyGeneratorManager:
         run_id = str(uuid.uuid4())
         options = options or {}
 
-        ontology_generation_runs_repo.create(
-            db,
-            run_id=run_id,
-            user_id=user_id,
-            connection_id=connection_id,
-            connection_name=connection_name,
-            selected_paths=selected_paths,
-            guidelines=guidelines,
-            base_uri=base_uri,
-            options=options,
-            steps=[],
-        )
-        db.commit()
+        if use_memory:
+            memory_run = _MemoryRun(
+                id=run_id,
+                user_id=user_id,
+                status="pending",
+                connection_id=connection_id,
+                connection_name=connection_name,
+                selected_paths=list(selected_paths or []),
+                guidelines=guidelines,
+                base_uri=base_uri,
+                options=options,
+                steps=[],
+            )
+            with self._lock:
+                self._memory_runs[run_id] = memory_run
+        else:
+            ontology_generation_runs_repo.create(
+                db,
+                run_id=run_id,
+                user_id=user_id,
+                connection_id=connection_id,
+                connection_name=connection_name,
+                selected_paths=selected_paths,
+                guidelines=guidelines,
+                base_uri=base_uri,
+                options=options,
+                steps=[],
+            )
+            db.commit()
 
         cancel_event = threading.Event()
         with self._lock:
@@ -653,12 +707,26 @@ class OntologyGeneratorManager:
 
         thread = threading.Thread(
             target=self._run_generation,
-            args=(run_id, metadata, guidelines, options, base_uri, user_token, cancel_event),
+            args=(run_id, metadata, guidelines, options, base_uri, user_token, cancel_event, use_memory),
             daemon=True,
         )
         thread.start()
-        logger.info("Started background generation run %s for user %s", run_id, user_id)
+        logger.info(
+            "Started background generation run %s for user %s (memory=%s)",
+            run_id,
+            user_id,
+            use_memory,
+        )
         return run_id
+
+    def _update_memory_run(self, run_id: str, **fields) -> None:
+        with self._lock:
+            run = self._memory_runs.get(run_id)
+            if not run:
+                return
+            for key, value in fields.items():
+                setattr(run, key, value)
+            run.updated_at = datetime.now(timezone.utc)
 
     def _run_generation(
         self,
@@ -669,13 +737,25 @@ class OntologyGeneratorManager:
         base_uri: str,
         user_token: Optional[str],
         cancel_event: threading.Event,
+        use_memory: bool = False,
     ) -> None:
         """Background thread body — runs generate_ontology and persists results."""
-        from src.common.database import get_session_factory
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
 
-        SessionLocal = get_session_factory()
-        db = SessionLocal()
+        db = None
+        if not use_memory:
+            try:
+                from src.common.database import get_session_factory
+
+                SessionLocal = get_session_factory()
+                db = SessionLocal()
+            except Exception as exc:
+                logger.warning(
+                    "No DB session for generation run %s; falling back to memory: %s",
+                    run_id,
+                    exc,
+                )
+                use_memory = True
 
         accumulated_steps: List[dict] = []
 
@@ -686,6 +766,14 @@ class OntologyGeneratorManager:
                 "tool_name": "",
                 "duration_ms": 0,
             })
+            if use_memory:
+                self._update_memory_run(
+                    run_id,
+                    steps=list(accumulated_steps),
+                    progress_message=msg,
+                    status="running",
+                )
+                return
             try:
                 ontology_generation_runs_repo.update_steps(db, run_id, accumulated_steps, progress_message=msg)
                 db.commit()
@@ -693,8 +781,11 @@ class OntologyGeneratorManager:
                 db.rollback()
 
         try:
-            ontology_generation_runs_repo.update_status(db, run_id, 'running', progress_message='Starting…')
-            db.commit()
+            if use_memory:
+                self._update_memory_run(run_id, status="running", progress_message="Starting…")
+            else:
+                ontology_generation_runs_repo.update_status(db, run_id, 'running', progress_message='Starting…')
+                db.commit()
 
             result = self.generate_ontology(
                 metadata=metadata,
@@ -707,13 +798,22 @@ class OntologyGeneratorManager:
             )
 
             if cancel_event.is_set():
-                ontology_generation_runs_repo.update_status(
-                    db, run_id, 'cancelled',
-                    progress_message='Cancelled',
-                    error=result.error or 'Cancelled by user',
-                    completed_at=datetime.now(timezone.utc),
-                )
-                db.commit()
+                if use_memory:
+                    self._update_memory_run(
+                        run_id,
+                        status="cancelled",
+                        progress_message="Cancelled",
+                        error=result.error or "Cancelled by user",
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                else:
+                    ontology_generation_runs_repo.update_status(
+                        db, run_id, 'cancelled',
+                        progress_message='Cancelled',
+                        error=result.error or 'Cancelled by user',
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    db.commit()
                 return
 
             final_steps = [
@@ -723,36 +823,65 @@ class OntologyGeneratorManager:
 
             if result.success:
                 result_dict = self._agent_result_to_response_dict(result)
-                run = ontology_generation_runs_repo.get(db, run_id)
-                if run:
-                    run.steps = final_steps
-                    run.result = result_dict
-                    run.status = 'completed'
-                    run.progress_message = 'Completed'
-                    run.completed_at = datetime.now(timezone.utc)
-                    db.commit()
+                if use_memory:
+                    self._update_memory_run(
+                        run_id,
+                        steps=final_steps,
+                        result=result_dict,
+                        status="completed",
+                        progress_message="Completed",
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                else:
+                    run = ontology_generation_runs_repo.get(db, run_id)
+                    if run:
+                        run.steps = final_steps
+                        run.result = result_dict
+                        run.status = 'completed'
+                        run.progress_message = 'Completed'
+                        run.completed_at = datetime.now(timezone.utc)
+                        db.commit()
             else:
-                ontology_generation_runs_repo.update_steps(db, run_id, final_steps, progress_message='Failed')
-                ontology_generation_runs_repo.update_status(
-                    db, run_id, 'failed',
-                    error=result.error,
-                    completed_at=datetime.now(timezone.utc),
-                )
-                db.commit()
+                if use_memory:
+                    self._update_memory_run(
+                        run_id,
+                        steps=final_steps,
+                        status="failed",
+                        progress_message="Failed",
+                        error=result.error,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                else:
+                    ontology_generation_runs_repo.update_steps(db, run_id, final_steps, progress_message='Failed')
+                    ontology_generation_runs_repo.update_status(
+                        db, run_id, 'failed',
+                        error=result.error,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    db.commit()
 
         except Exception as exc:
             logger.exception("Background generation run %s failed with exception", run_id)
-            try:
-                ontology_generation_runs_repo.update_status(
-                    db, run_id, 'failed',
+            if use_memory:
+                self._update_memory_run(
+                    run_id,
+                    status="failed",
                     error=str(exc),
                     completed_at=datetime.now(timezone.utc),
                 )
-                db.commit()
-            except Exception:
-                db.rollback()
+            else:
+                try:
+                    ontology_generation_runs_repo.update_status(
+                        db, run_id, 'failed',
+                        error=str(exc),
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
         finally:
-            db.close()
+            if db is not None:
+                db.close()
             with self._lock:
                 self._cancel_events.pop(run_id, None)
 
@@ -766,30 +895,63 @@ class OntologyGeneratorManager:
             return True
         return False
 
-    @staticmethod
-    def get_run(db: Session, run_id: str):
+    def get_run(self, db: Session, run_id: str):
+        with self._lock:
+            memory = self._memory_runs.get(run_id)
+        if memory is not None:
+            return memory
+        if _is_noop_db(db):
+            return None
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
         return ontology_generation_runs_repo.get(db, run_id)
 
-    @staticmethod
-    def get_run_for_user(db: Session, run_id: str, user_id: str):
+    def get_run_for_user(self, db: Session, run_id: str, user_id: str):
+        run = self.get_run(db, run_id)
+        if run is not None and getattr(run, "user_id", None) == user_id:
+            return run
+        if _is_noop_db(db):
+            return None
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
         return ontology_generation_runs_repo.get_for_user(db, run_id, user_id)
 
-    @staticmethod
-    def list_runs(db: Session, user_id: str, *, limit: int = 50):
+    def list_runs(self, db: Session, user_id: str, *, limit: int = 50):
+        with self._lock:
+            memory_rows = [
+                run for run in self._memory_runs.values() if run.user_id == user_id
+            ]
+        memory_rows.sort(key=lambda r: r.created_at, reverse=True)
+        if _is_noop_db(db):
+            return memory_rows[:limit]
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
-        return ontology_generation_runs_repo.list_for_user(db, user_id, limit=limit)
+        db_rows = ontology_generation_runs_repo.list_for_user(db, user_id, limit=limit)
+        # Prefer memory rows for ids still in-flight on this process.
+        by_id = {r.id: r for r in db_rows}
+        for run in memory_rows:
+            by_id[run.id] = run
+        merged = sorted(by_id.values(), key=lambda r: r.created_at, reverse=True)
+        return merged[:limit]
 
-    @staticmethod
-    def list_all_runs(db: Session, *, limit: int = 50):
+    def list_all_runs(self, db: Session, *, limit: int = 50):
+        with self._lock:
+            memory_rows = list(self._memory_runs.values())
+        memory_rows.sort(key=lambda r: r.created_at, reverse=True)
+        if _is_noop_db(db):
+            return memory_rows[:limit]
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
-        return ontology_generation_runs_repo.list_all(db, limit=limit)
+        db_rows = ontology_generation_runs_repo.list_all(db, limit=limit)
+        by_id = {r.id: r for r in db_rows}
+        for run in memory_rows:
+            by_id[run.id] = run
+        merged = sorted(by_id.values(), key=lambda r: r.created_at, reverse=True)
+        return merged[:limit]
 
-    @staticmethod
-    def delete_run(db: Session, run_id: str) -> bool:
+    def delete_run(self, db: Session, run_id: str) -> bool:
+        with self._lock:
+            existed = self._memory_runs.pop(run_id, None) is not None
+        if _is_noop_db(db):
+            return existed
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
-        return ontology_generation_runs_repo.delete(db, run_id)
+        return ontology_generation_runs_repo.delete(db, run_id) or existed
 
     @staticmethod
     def _agent_result_to_response_dict(result: AgentResult) -> dict:

@@ -141,3 +141,50 @@ def test_uc_native_semantic_manager_loads_ontology_graph():
     assert isinstance(props, dict)
     assert all(isinstance(v, list) for v in props.values())
     assert sum(len(v) for v in props.values()) > 0
+
+    # Any concept from the grouped list should resolve via get_concept_details.
+    sample_iri = next(iter(next(iter(grouped.values())))).iri
+    details = mgr.get_concept_details(sample_iri)
+    assert details is not None
+    assert details.iri == sample_iri
+    assert details.label
+
+
+def test_ontology_generator_memory_runs_without_postgres():
+    from src.common.config import Settings
+    from src.controller.ontology_generator_manager import OntologyGeneratorManager
+
+    class _NoOpDbSession:
+        def commit(self):
+            return None
+
+        def refresh(self, *_a, **_k):
+            return None
+
+    mgr = OntologyGeneratorManager(settings=Settings())
+    # Avoid real LLM: stub generate_ontology.
+    mgr.generate_ontology = lambda **kwargs: __import__(
+        "src.controller.ontology_generator_manager", fromlist=["AgentResult"]
+    ).AgentResult(success=True, owl_content="@prefix : <http://ex#> .\n:Foo a owl:Class .", steps=[])
+
+    run_id = mgr.start_run(
+        db=_NoOpDbSession(),
+        user_id="tester@example.com",
+        metadata={"tables": [{"name": "t", "full_name": "c.s.t", "columns": []}]},
+        guidelines="test",
+    )
+    assert run_id
+    # Allow background thread to finish quickly.
+    import time
+
+    for _ in range(50):
+        run = mgr.get_run(_NoOpDbSession(), run_id)
+        if run and run.status in ("completed", "failed", "cancelled"):
+            break
+        time.sleep(0.05)
+    run = mgr.get_run(_NoOpDbSession(), run_id)
+    assert run is not None
+    assert run.user_id == "tester@example.com"
+    assert run.status in ("completed", "failed", "running", "pending")
+    listed = mgr.list_runs(_NoOpDbSession(), "tester@example.com")
+    assert any(r.id == run_id for r in listed)

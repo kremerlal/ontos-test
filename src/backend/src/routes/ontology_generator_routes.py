@@ -209,10 +209,15 @@ def generate_from_connection(
     }
 
     try:
-        from src.controller.connections_manager import ConnectionsManager
+        # Prefer the app-wired connections manager (UC-native or Lakebase).
+        # Instantiating a fresh ConnectionsManager(db=...) fails in uc_native
+        # because the NoOp session has no connection rows.
+        conn_mgr = getattr(request.app.state, "connections_manager", None)
+        if conn_mgr is None:
+            from src.controller.connections_manager import ConnectionsManager
 
-        ws = get_obo_workspace_client(request)
-        conn_mgr = ConnectionsManager(db=db, workspace_client=ws)
+            ws = get_obo_workspace_client(request)
+            conn_mgr = ConnectionsManager(db=db, workspace_client=ws)
 
         connector = conn_mgr.get_connector_for_connection(UUID(body.connection_id))
         if connector is None:
@@ -335,8 +340,13 @@ async def get_run(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    # Refresh to pick up latest background-thread updates
-    db.refresh(run)
+    # Refresh to pick up latest background-thread updates (Postgres only).
+    # In-memory UC-native runs are already the live object.
+    if type(run).__name__ != "_MemoryRun":
+        try:
+            db.refresh(run)
+        except Exception:
+            pass
     return _run_to_detail(run)
 
 
