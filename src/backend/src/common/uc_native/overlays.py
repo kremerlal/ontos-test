@@ -64,6 +64,27 @@ class UcNativeOverlayStore:
         self._store.merge_row("entity_relationships", payload)
         return payload
 
+    def add_relationships(
+        self,
+        relationships: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Insert known-new relationships with chunked Delta statements."""
+        payloads: List[Dict[str, Any]] = []
+        for relationship in relationships:
+            payloads.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "source_entity_id": relationship["source_entity_id"],
+                    "source_entity_type": relationship["source_entity_type"],
+                    "target_entity_id": relationship["target_entity_id"],
+                    "target_entity_type": relationship["target_entity_type"],
+                    "relationship_type": relationship["relationship_type"],
+                    "snapshot_json": json.dumps(relationship.get("properties") or {}),
+                }
+            )
+        self._store.insert_rows("entity_relationships", payloads)
+        return payloads
+
     def append_change_log(
         self,
         *,

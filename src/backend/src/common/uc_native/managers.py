@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set
 from uuid import UUID
 
 from src.common.logging import get_logger
 from src.common.uc_native.entities import UcNativeEntityStore
+from src.common.uc_native.overlays import UcNativeOverlayStore
 from src.models.data_contracts_api import DataContractSummary
 from src.models.data_domains import DataDomainCreate, DataDomainRead, DataDomainUpdate
 from src.models.data_products import DataProduct, DataProductStatus
-from src.models.assets import AssetRead, PaginatedAssetSummary
+from src.models.assets import (
+    AssetCreate,
+    AssetRead,
+    AssetRelationshipCreate,
+    AssetRelationshipRead,
+    PaginatedAssetSummary,
+)
 from src.models.tags import Tag, TagCreate, TagNamespace, TagNamespaceCreate
 from src.models.connections import ConnectionCreate, ConnectionUpdate, ConnectionResponse
 from src.controller.connections_manager import SYSTEM_CREATED_BY
@@ -20,6 +28,22 @@ from src.connectors.registry import get_registry
 from src.connectors.base import AssetConnector, ConnectorConfig
 
 logger = get_logger(__name__)
+
+# Stable namespace for seeded Ontos asset-type UUIDs (uuid5).
+_ASSET_TYPE_NS = uuid.UUID("a0000000-0000-4000-8000-000000000001")
+
+# Minimal built-in types required by Schema Importer / UC browse mapping.
+_DEFAULT_ASSET_TYPES: List[Dict[str, Any]] = [
+    {"name": "System", "category": "system", "description": "External system / connector"},
+    {"name": "Catalog", "category": "data", "description": "Catalog / database container"},
+    {"name": "Schema", "category": "data", "description": "Schema / dataset container"},
+    {"name": "Table", "category": "data", "description": "Table or streaming table"},
+    {"name": "View", "category": "data", "description": "View or materialized view"},
+    {"name": "Column", "category": "data", "description": "Column within a table/view"},
+    {"name": "Dataset", "category": "data", "description": "Logical dataset"},
+    {"name": "Dashboard", "category": "analytics", "description": "Dashboard or report"},
+    {"name": "ML Model", "category": "analytics", "description": "Machine learning model"},
+]
 
 
 def _to_data_product(doc: Dict[str, Any]) -> DataProduct:
@@ -265,8 +289,111 @@ class UcNativeDataContractsManager:
 
 
 class UcNativeAssetsManager:
-    def __init__(self, entities: UcNativeEntityStore) -> None:
+    """Assets + asset-types SoR on UC Delta (Schema Import write path)."""
+
+    def __init__(
+        self,
+        entities: UcNativeEntityStore,
+        overlays: Optional[UcNativeOverlayStore] = None,
+    ) -> None:
         self._entities = entities
+        self._overlays = overlays
+        self._type_cache: Dict[str, SimpleNamespace] = {}
+        self._types_loaded = False
+        # Identity index: (name, asset_type_id, platform, location) -> asset UUID
+        self._identity_index: Optional[Dict[tuple, UUID]] = None
+
+    # --- Asset types -------------------------------------------------------
+
+    def _load_type_cache(self) -> None:
+        if self._types_loaded:
+            return
+        for row in self._entities.list_entities("asset_types", limit=200):
+            name = row.get("name")
+            if not name or not row.get("id"):
+                continue
+            self._type_cache[name] = SimpleNamespace(
+                id=UUID(str(row["id"])),
+                name=name,
+            )
+        self._types_loaded = True
+
+    def ensure_default_asset_types(self) -> int:
+        """Idempotently seed built-in Ontos asset types used by Schema Importer."""
+        self._load_type_cache()
+        created = 0
+        now = _now().isoformat()
+        for spec in _DEFAULT_ASSET_TYPES:
+            name = spec["name"]
+            if name in self._type_cache:
+                continue
+            type_id = str(uuid.uuid5(_ASSET_TYPE_NS, name))
+            # Prefer stable id if a prior seed wrote it under that id without caching.
+            existing = self._entities.get_entity("asset_types", type_id)
+            if existing:
+                self._type_cache[name] = SimpleNamespace(
+                    id=UUID(type_id),
+                    name=existing.get("name", name),
+                )
+                continue
+            payload = {
+                "id": type_id,
+                "name": name,
+                "description": spec.get("description"),
+                "category": spec.get("category", "data"),
+                "is_system": True,
+                "status": "active",
+                "created_by": "system@uc-native",
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._entities.save_entity(
+                "asset_types",
+                payload,
+                index_fields={
+                    "name": name,
+                    "category": payload["category"],
+                    "is_system": True,
+                    "status": "active",
+                    "updated_at": now,
+                },
+            )
+            self._type_cache[name] = SimpleNamespace(id=UUID(type_id), name=name)
+            created += 1
+            logger.info("Seeded UC-native asset type '%s' (%s)", name, type_id)
+        return created
+
+    def get_asset_type_by_name(self, name: str) -> Optional[SimpleNamespace]:
+        if name in self._type_cache:
+            return self._type_cache[name]
+        # Prefer stable uuid5 lookup (single-row read) before listing the table.
+        stable_id = str(uuid.uuid5(_ASSET_TYPE_NS, name))
+        doc = self._entities.get_entity("asset_types", stable_id)
+        if doc:
+            ns = SimpleNamespace(id=UUID(str(doc["id"])), name=doc.get("name", name))
+            self._type_cache[name] = ns
+            return ns
+        self._load_type_cache()
+        return self._type_cache.get(name)
+
+    def get_asset_type(self, type_id: UUID) -> Optional[SimpleNamespace]:
+        type_id_str = str(type_id)
+        for ns in self._type_cache.values():
+            if str(ns.id) == type_id_str:
+                return ns
+        doc = self._entities.get_entity("asset_types", type_id_str)
+        if not doc:
+            self._load_type_cache()
+            for ns in self._type_cache.values():
+                if str(ns.id) == type_id_str:
+                    return ns
+            return None
+        ns = SimpleNamespace(id=UUID(str(doc["id"])), name=doc.get("name", ""))
+        if ns.name:
+            self._type_cache[ns.name] = ns
+        return ns
+
+    # --- Assets ------------------------------------------------------------
 
     def list_assets(self, limit: int = 500, **_) -> List[Dict[str, Any]]:
         return self._entities.list_entities("assets", limit=limit)
@@ -274,19 +401,314 @@ class UcNativeAssetsManager:
     def get_asset(self, asset_id: str) -> Optional[Dict[str, Any]]:
         return self._entities.get_entity("assets", asset_id)
 
-    def create_asset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        payload = dict(payload)
-        payload.setdefault("id", str(uuid.uuid4()))
-        payload.setdefault("status", "active")
-        return self._entities.save_entity(
+    @staticmethod
+    def _identity_key(
+        name: str,
+        asset_type_id: UUID | str,
+        platform: Optional[str],
+        location: Optional[str],
+    ) -> tuple:
+        return (
+            name,
+            str(asset_type_id),
+            platform or "",
+            location or "",
+        )
+
+    def _ensure_identity_index(self) -> Dict[tuple, UUID]:
+        """Load assets once into memory for O(1) identity lookups (preview/import)."""
+        if self._identity_index is not None:
+            return self._identity_index
+        index: Dict[tuple, UUID] = {}
+        # Cap is generous; schema import identity checks must not re-scan Delta per item.
+        for doc in self._entities.list_entities("assets", limit=20000):
+            if not doc.get("id") or not doc.get("name") or not doc.get("asset_type_id"):
+                continue
+            key = self._identity_key(
+                doc["name"],
+                doc["asset_type_id"],
+                doc.get("platform"),
+                doc.get("location"),
+            )
+            index[key] = UUID(str(doc["id"]))
+        self._identity_index = index
+        logger.debug("Built UC-native asset identity index (%s entries)", len(index))
+        return index
+
+    def _invalidate_identity_index(self) -> None:
+        self._identity_index = None
+
+    def get_by_identity(
+        self,
+        *,
+        name: str,
+        asset_type_id: UUID,
+        platform: Optional[str] = None,
+        location: Optional[str] = None,
+        **_,
+    ) -> Optional[SimpleNamespace]:
+        index = self._ensure_identity_index()
+        key = self._identity_key(name, asset_type_id, platform, location)
+        asset_id = index.get(key)
+        if asset_id is None:
+            return None
+        return SimpleNamespace(id=asset_id)
+
+    def _to_asset_read(self, doc: Dict[str, Any]) -> AssetRead:
+        now = _now()
+        type_id = doc.get("asset_type_id")
+        if not type_id:
+            # Fallback: resolve from type name if present
+            type_name = doc.get("asset_type_name") or "Table"
+            at = self.get_asset_type_by_name(type_name)
+            type_id = str(at.id) if at else str(uuid.uuid5(_ASSET_TYPE_NS, type_name))
+        payload = {
+            "id": doc.get("id"),
+            "name": doc.get("name", "Asset"),
+            "description": doc.get("description"),
+            "asset_type_id": type_id,
+            "asset_type_name": doc.get("asset_type_name"),
+            "platform": doc.get("platform"),
+            "location": doc.get("location"),
+            "domain_id": doc.get("domain_id"),
+            "properties": doc.get("properties"),
+            "tags": doc.get("tags") or [],
+            "status": doc.get("status") or "active",
+            "created_by": doc.get("created_by"),
+            "created_at": doc.get("created_at") or now,
+            "updated_at": doc.get("updated_at") or now,
+            "relationships": doc.get("relationships") or [],
+        }
+        return AssetRead.model_validate(payload)
+
+    def create_asset(
+        self,
+        db_or_payload=None,
+        *,
+        asset_in: Optional[AssetCreate] = None,
+        current_user_id: str = "system",
+        payload: Optional[Dict[str, Any]] = None,
+        **_,
+    ):
+        """Create an asset.
+
+        Supports:
+        - Schema Import: ``create_asset(db, asset_in=..., current_user_id=...)`` -> AssetRead
+        - Legacy dict: ``create_asset(payload={...})`` or ``create_asset({...})`` -> dict
+        """
+        if asset_in is not None:
+            doc = self._asset_doc(asset_in, current_user_id)
+            saved = self._entities.save_entity(
+                "assets",
+                doc,
+                index_fields={
+                    "name": doc["name"],
+                    "asset_type_name": doc.get("asset_type_name"),
+                    "status": doc["status"],
+                    "updated_at": doc["updated_at"],
+                },
+            )
+            type_id = saved.get("asset_type_id")
+            if self._identity_index is not None and type_id:
+                key = self._identity_key(
+                    saved["name"],
+                    type_id,
+                    saved.get("platform"),
+                    saved.get("location"),
+                )
+                self._identity_index[key] = UUID(str(saved["id"]))
+            logger.info("Created UC-native asset '%s' (%s)", saved["name"], saved["id"])
+            return self._to_asset_read(saved)
+
+        raw = payload if payload is not None else db_or_payload
+        if not isinstance(raw, dict):
+            raise TypeError("create_asset requires asset_in= or a dict payload")
+        raw = dict(raw)
+        raw.setdefault("id", str(uuid.uuid4()))
+        raw.setdefault("status", "active")
+        raw.setdefault("updated_at", _now().isoformat())
+        saved = self._entities.save_entity(
             "assets",
-            payload,
+            raw,
             index_fields={
-                "name": payload.get("name"),
-                "asset_type_name": payload.get("asset_type_name") or payload.get("asset_type"),
-                "status": payload.get("status"),
+                "name": raw.get("name"),
+                "asset_type_name": raw.get("asset_type_name") or raw.get("asset_type"),
+                "status": raw.get("status"),
+                "updated_at": raw.get("updated_at"),
             },
         )
+        self._invalidate_identity_index()
+        return saved
+
+    def _asset_doc(self, asset_in: AssetCreate, current_user_id: str) -> Dict[str, Any]:
+        data = asset_in.model_dump()
+        type_id = data.get("asset_type_id")
+        type_name = None
+        if type_id:
+            at = self.get_asset_type(UUID(str(type_id)))
+            type_name = at.name if at else None
+        now = _now().isoformat()
+        return {
+            "id": str(uuid.uuid4()),
+            "name": data["name"],
+            "description": data.get("description"),
+            "asset_type_id": str(type_id) if type_id else None,
+            "asset_type_name": type_name,
+            "platform": data.get("platform"),
+            "location": data.get("location"),
+            "domain_id": str(data["domain_id"]) if data.get("domain_id") else None,
+            "properties": data.get("properties"),
+            "tags": data.get("tags") or [],
+            "status": (
+                data["status"].value
+                if hasattr(data.get("status"), "value")
+                else (data.get("status") or "active")
+            ),
+            "created_by": current_user_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def create_assets_bulk(
+        self,
+        asset_inputs: List[AssetCreate],
+        *,
+        current_user_id: str = "system",
+    ) -> List[AssetRead]:
+        """Create known-new assets using chunked Delta inserts."""
+        docs = [self._asset_doc(asset_in, current_user_id) for asset_in in asset_inputs]
+        entries = [
+            (
+                doc,
+                {
+                    "name": doc["name"],
+                    "asset_type_name": doc.get("asset_type_name"),
+                    "status": doc["status"],
+                    "updated_at": doc["updated_at"],
+                },
+            )
+            for doc in docs
+        ]
+        if hasattr(self._entities, "create_entities"):
+            saved_docs = self._entities.create_entities("assets", entries)
+        else:
+            saved_docs = [
+                self._entities.save_entity("assets", doc, index_fields=index_fields)
+                for doc, index_fields in entries
+            ]
+        if not isinstance(saved_docs, list):
+            raise TypeError(
+                f"create_entities must return a list of docs, got {type(saved_docs).__name__}"
+            )
+
+        if self._identity_index is not None:
+            for saved in saved_docs:
+                type_id = saved.get("asset_type_id")
+                if type_id:
+                    self._identity_index[
+                        self._identity_key(
+                            saved["name"],
+                            type_id,
+                            saved.get("platform"),
+                            saved.get("location"),
+                        )
+                    ] = UUID(str(saved["id"]))
+        logger.info("Created %s UC-native assets in bulk", len(saved_docs))
+        return [self._to_asset_read(saved) for saved in saved_docs]
+
+    def add_relationship(
+        self,
+        db=None,
+        *,
+        rel_in: AssetRelationshipCreate,
+        current_user_id: str = "system",
+    ) -> AssetRelationshipRead:
+        """Persist an asset-to-asset relationship in entity_relationships."""
+        now = _now()
+        if self._overlays is not None:
+            props = dict(rel_in.properties or {})
+            source_type = props.get("source_entity_type") or props.get("source_type") or "asset"
+            target_type = props.get("target_entity_type") or props.get("target_type") or "asset"
+            saved = self._overlays.add_relationship(
+                source_entity_id=str(rel_in.source_asset_id),
+                source_entity_type=source_type,
+                target_entity_id=str(rel_in.target_asset_id),
+                target_entity_type=target_type,
+                relationship_type=rel_in.relationship_type,
+                properties=props,
+            )
+            return AssetRelationshipRead(
+                id=UUID(str(saved["id"])),
+                source_asset_id=rel_in.source_asset_id,
+                target_asset_id=rel_in.target_asset_id,
+                relationship_type=rel_in.relationship_type,
+                properties=rel_in.properties,
+                created_by=current_user_id,
+                created_at=now,
+            )
+        # Fallback when overlays unavailable (unit tests): return ephemeral read model.
+        logger.warning(
+            "UC-native overlays unavailable; relationship %s %s -> %s not persisted",
+            rel_in.relationship_type,
+            rel_in.source_asset_id,
+            rel_in.target_asset_id,
+        )
+        return AssetRelationshipRead(
+            id=uuid.uuid4(),
+            source_asset_id=rel_in.source_asset_id,
+            target_asset_id=rel_in.target_asset_id,
+            relationship_type=rel_in.relationship_type,
+            properties=rel_in.properties,
+            created_by=current_user_id,
+            created_at=now,
+        )
+
+    def add_relationships_bulk(
+        self,
+        relationships: List[AssetRelationshipCreate],
+        *,
+        current_user_id: str = "system",
+    ) -> List[AssetRelationshipRead]:
+        """Persist known-new asset relationships with chunked Delta inserts."""
+        if self._overlays is None or not hasattr(self._overlays, "add_relationships"):
+            return [
+                self.add_relationship(rel_in=relationship, current_user_id=current_user_id)
+                for relationship in relationships
+            ]
+        saved_rows = self._overlays.add_relationships(
+            [
+                {
+                    "source_entity_id": str(relationship.source_asset_id),
+                    "source_entity_type": (relationship.properties or {}).get(
+                        "source_entity_type", "asset"
+                    ),
+                    "target_entity_id": str(relationship.target_asset_id),
+                    "target_entity_type": (relationship.properties or {}).get(
+                        "target_entity_type", "asset"
+                    ),
+                    "relationship_type": relationship.relationship_type,
+                    "properties": relationship.properties,
+                }
+                for relationship in relationships
+            ]
+        )
+        if not isinstance(saved_rows, list):
+            raise TypeError(
+                f"add_relationships must return a list of rows, got {type(saved_rows).__name__}"
+            )
+        now = _now()
+        return [
+            AssetRelationshipRead(
+                id=UUID(str(saved["id"])),
+                source_asset_id=relationship.source_asset_id,
+                target_asset_id=relationship.target_asset_id,
+                relationship_type=relationship.relationship_type,
+                properties=relationship.properties,
+                created_by=current_user_id,
+                created_at=now,
+            )
+            for relationship, saved in zip(relationships, saved_rows)
+        ]
 
     def resolve_accessible_asset_ids(self, db, *, data_products_manager, is_admin: bool = False):
         if is_admin:
@@ -305,14 +727,14 @@ class UcNativeAssetsManager:
         items = []
         for doc in page:
             try:
-                items.append(AssetRead.model_validate({**doc, "tags": doc.get("tags") or []}))
+                items.append(self._to_asset_read(doc))
             except Exception:
                 items.append(
-                    AssetRead.model_validate(
+                    self._to_asset_read(
                         {
-                            "id": doc.get("id"),
+                            "id": doc.get("id") or str(uuid.uuid4()),
                             "name": doc.get("name", "Asset"),
-                            "asset_type_name": doc.get("asset_type_name", "table"),
+                            "asset_type_name": doc.get("asset_type_name", "Table"),
                             "status": doc.get("status", "active"),
                             "tags": [],
                         }
@@ -324,7 +746,7 @@ class UcNativeAssetsManager:
         doc = self.get_asset(str(asset_id))
         if not doc:
             return None
-        return AssetRead.model_validate({**doc, "tags": doc.get("tags") or []})
+        return self._to_asset_read(doc)
 
 
 class UcNativeDataDomainManager:

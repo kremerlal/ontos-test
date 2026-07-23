@@ -128,7 +128,8 @@ export default function OntologyHomeView() {
 
       const propsGrouped: Record<string, OntologyConcept[]> = {};
       for (const [source, props] of Object.entries(data.grouped_properties || {})) {
-        propsGrouped[source] = (props as any[]).map((p: any) => ({
+        const rows = Array.isArray(props) ? props : [];
+        propsGrouped[source] = rows.map((p: any) => ({
           ...p,
           properties: [],
           synonyms: [],

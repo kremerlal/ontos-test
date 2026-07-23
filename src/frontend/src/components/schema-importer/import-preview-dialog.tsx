@@ -171,9 +171,19 @@ export default function ImportPreviewDialog({
         dry_run: true,
       };
       const resp = await apiPost<ImportPreviewItem[]>('/api/schema-import/preview', payload);
-      if (resp.data) {
+      if (resp.error) {
+        throw new Error(resp.error);
+      }
+      // useApi returns data: {} on many failure paths — only accept a real array.
+      if (Array.isArray(resp.data)) {
         setPreviewItems(resp.data);
         setHasLoaded(true);
+      } else {
+        toast({
+          title: 'Preview failed',
+          description: 'No preview data returned from the server.',
+          variant: 'destructive',
+        });
       }
     } catch (err) {
       console.error('Preview failed:', err);
@@ -198,14 +208,23 @@ export default function ImportPreviewDialog({
         path_mappings: Object.keys(mappingsForApi).length > 0 ? mappingsForApi : undefined,
       };
       const resp = await apiPost<ImportResult>('/api/schema-import/import', payload);
-      if (resp.data) {
-        setImportResult(resp.data);
-        setCollapsed(new Set());
-        toast({
-          title: 'Import complete',
-          description: `Created ${resp.data.created}, skipped ${resp.data.skipped}, errors ${resp.data.errors}`,
-        });
+      if (resp.error) {
+        throw new Error(resp.error);
       }
+      // useApi returns data: {} on timeout/HTTP errors; {} is truthy but items is
+      // undefined — buildTree then throws minified "e is not iterable".
+      const result = resp.data;
+      if (!result || !Array.isArray(result.items)) {
+        throw new Error(
+          'Import response was incomplete or timed out. Try a smaller selection, or retry after the server finishes writing.',
+        );
+      }
+      setImportResult(result);
+      setCollapsed(new Set());
+      toast({
+        title: 'Import complete',
+        description: `Created ${result.created}, skipped ${result.skipped}, errors ${result.errors}`,
+      });
     } catch (err) {
       console.error('Import failed:', err);
       toast({ title: 'Import failed', description: String(err), variant: 'destructive' });
@@ -239,7 +258,10 @@ export default function ImportPreviewDialog({
   );
 
   const resultTree = useMemo(
-    () => (importResult ? buildTree(importResult.items, (i) => i.path, (i) => i.parent_path) : []),
+    () =>
+      importResult && Array.isArray(importResult.items)
+        ? buildTree(importResult.items, (i) => i.path, (i) => i.parent_path)
+        : [],
     [importResult],
   );
 

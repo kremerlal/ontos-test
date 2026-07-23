@@ -103,7 +103,9 @@ export function LineageEditor({
         const res = await fetch(`/api/ontology/entity-types/relationships?type_iri=${encodeURIComponent(iri)}&lang=${encodeURIComponent(i18n.language)}`);
         if (!res.ok) throw new Error(`Failed to load relationships (${res.status})`);
         const data: EntityRelationships = await res.json();
-        setRelationships([...data.outgoing, ...data.incoming]);
+        const outgoing = Array.isArray(data?.outgoing) ? data.outgoing : [];
+        const incoming = Array.isArray(data?.incoming) ? data.incoming : [];
+        setRelationships([...outgoing, ...incoming]);
       } catch (err: any) {
         setSchemaError(err.message || 'Failed to load ontology relationships');
         setRelationships([]);

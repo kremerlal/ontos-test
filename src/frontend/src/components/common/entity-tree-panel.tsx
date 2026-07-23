@@ -458,8 +458,8 @@ export function EntityTreePanel({
 
   // ------ derived data ------
 
-  const outgoing = data?.outgoing || [];
-  const incoming = data?.incoming || [];
+  const outgoing = Array.isArray(data?.outgoing) ? data.outgoing : [];
+  const incoming = Array.isArray(data?.incoming) ? data.incoming : [];
   const total = outgoing.length + incoming.length;
 
   const rootNodes: RootNode[] = useMemo(() => {

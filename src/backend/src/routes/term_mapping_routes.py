@@ -72,6 +72,17 @@ async def create_run(
     Returns the persisted run with stats. For large estates this becomes a
     background-job-backed endpoint in a future phase.
     """
+    # UC-native uses a NoOp DB session — term-mapping run/suggestion tables are
+    # still Postgres-backed. Fail clearly instead of returning a phantom run.
+    if type(db).__name__ == "_NoOpDbSession":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Term Mapping runs are not yet persisted in UC-native mode. "
+                "Entity Relationships and Ontology Generator are available; "
+                "Term Mapping create/apply requires Lakebase or an upcoming UC Delta store."
+            ),
+        )
     try:
         return _get_manager(request).create_run(
             db, payload=payload, created_by=getattr(user, "email", None)

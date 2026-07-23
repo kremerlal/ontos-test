@@ -14,14 +14,13 @@ from src.common.logging import get_logger
 from src.connectors.base import AssetConnector, ListAssetsOptions
 from src.controller.connections_manager import ConnectionsManager
 from src.controller.assets_manager import AssetsManager
-from src.db_models.assets import AssetDb
-from src.db_models.connections import ConnectionDb
 from src.models.assets import (
     AssetCreate,
     AssetRelationshipCreate,
     AssetStatus,
     UnifiedAssetType,
 )
+from src.models.connections import ConnectionUpdate
 from src.models.schema_import import (
     BrowseNode,
     BrowseResponse,
@@ -36,6 +35,12 @@ from src.repositories.assets_repository import asset_repo, asset_type_repo
 from src.repositories.connections_repository import connections_repo
 
 logger = get_logger(__name__)
+
+
+def _is_uc_native_assets(assets_manager: Any) -> bool:
+    return hasattr(assets_manager, "get_asset_type_by_name") and hasattr(
+        assets_manager, "get_by_identity"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +124,63 @@ class SchemaImportManager:
     ):
         self._connections = connections_manager
         self._assets = assets_manager
+
+    # ------------------------------------------------------------------
+    # Storage helpers (Postgres repo vs UC-native Delta managers)
+    # ------------------------------------------------------------------
+
+    def _lookup_asset_type(self, db: Session, name: str):
+        if _is_uc_native_assets(self._assets):
+            return self._assets.get_asset_type_by_name(name)
+        return asset_type_repo.get_by_name(db, name=name)
+
+    def _lookup_asset_by_identity(
+        self,
+        db: Session,
+        *,
+        name: str,
+        asset_type_id: UUID,
+        platform: Optional[str],
+        location: Optional[str],
+    ):
+        if _is_uc_native_assets(self._assets):
+            return self._assets.get_by_identity(
+                name=name,
+                asset_type_id=asset_type_id,
+                platform=platform,
+                location=location,
+            )
+        return asset_repo.get_by_identity(
+            db,
+            name=name,
+            asset_type_id=asset_type_id,
+            platform=platform,
+            location=location,
+        )
+
+    def _lookup_asset_by_id(self, db: Session, asset_id: UUID):
+        if _is_uc_native_assets(self._assets):
+            return self._assets.get_asset_by_id(db, asset_id)
+        return asset_repo.get(db, asset_id)
+
+    def _get_connection_record(self, db: Session, connection_id: UUID):
+        if hasattr(self._connections, "get_connection"):
+            return self._connections.get_connection(connection_id)
+        return connections_repo.get(db, connection_id)
+
+    def _set_connection_system_asset(
+        self, db: Session, connection_id: UUID, system_asset_id: UUID
+    ) -> None:
+        if hasattr(self._connections, "update_connection"):
+            self._connections.update_connection(
+                connection_id,
+                ConnectionUpdate(system_asset_id=system_asset_id),
+            )
+            return
+        conn_db = connections_repo.get(db, connection_id)
+        if conn_db is not None:
+            conn_db.system_asset_id = system_asset_id
+            db.flush()
 
     # ------------------------------------------------------------------
     # Browse
@@ -228,7 +290,6 @@ class SchemaImportManager:
             raise ValueError(f"Connection '{request.connection_id}' not found or connector unavailable")
 
         items: List[ImportPreviewItem] = []
-        selected_set = set(request.selected_paths)
         expanded = self._expand_with_ancestors(request.selected_paths)
 
         # Prepend System preview item
@@ -300,6 +361,8 @@ class SchemaImportManager:
         created_assets: Dict[str, UUID] = {}
         type_cache: Dict[str, Any] = {}
         metadata_cache: Dict[str, Any] = {}
+        bulk_pending: List[tuple[ImportPreviewItem, AssetCreate]] = []
+        use_bulk_assets = hasattr(self._assets, "create_assets_bulk")
 
         # 2. Create assets (parents before children — items are in BFS order)
         for item in preview_items:
@@ -337,6 +400,16 @@ class SchemaImportManager:
                 continue
 
             try:
+                if use_bulk_assets:
+                    asset_input = self._build_asset_input_from_item(
+                        connector=connector,
+                        item=item,
+                        _type_cache=type_cache,
+                        _metadata_cache=metadata_cache,
+                        db=db,
+                    )
+                    bulk_pending.append((item, asset_input))
+                    continue
                 asset_read = self._create_asset_from_item(
                     db=db,
                     connector=connector,
@@ -368,6 +441,41 @@ class SchemaImportManager:
                     parent_path=item.parent_path,
                 ))
 
+        if bulk_pending:
+            try:
+                asset_reads = self._assets.create_assets_bulk(
+                    [asset_input for _, asset_input in bulk_pending],
+                    current_user_id=current_user_id,
+                )
+                if not isinstance(asset_reads, list):
+                    raise TypeError(
+                        f"create_assets_bulk must return a list, got {type(asset_reads).__name__}"
+                    )
+                for (item, _), asset_read in zip(bulk_pending, asset_reads):
+                    created_assets[item.path] = asset_read.id
+                    result.created += 1
+                    result.items.append(ImportResultItem(
+                        path=item.path,
+                        name=item.name,
+                        asset_type=item.asset_type,
+                        action="created",
+                        asset_id=asset_read.id,
+                        parent_path=item.parent_path,
+                    ))
+            except Exception as exc:
+                logger.error("Failed to bulk-create imported assets: %s", exc, exc_info=True)
+                for item, _ in bulk_pending:
+                    result.errors += 1
+                    result.error_messages.append(f"{item.path}: {exc}")
+                    result.items.append(ImportResultItem(
+                        path=item.path,
+                        name=item.name,
+                        asset_type=item.asset_type,
+                        action="error",
+                        error=str(exc),
+                        parent_path=item.parent_path,
+                    ))
+
         # 3. Wire relationships (both asset_relationships and entity_relationships)
         # Build a lookup from path -> (asset_type_name, asset_id) for entity relationships
         path_to_type: Dict[str, str] = {}
@@ -375,23 +483,41 @@ class SchemaImportManager:
             if item.path in created_assets:
                 path_to_type[item.path] = item.asset_type
 
+        relationship_inputs: List[AssetRelationshipCreate] = []
+        use_bulk_relationships = hasattr(self._assets, "add_relationships_bulk")
+        # UC-native persists relationships in Delta overlays; Postgres dual-write
+        # hits NoOp DB and only wastes time / surfaces confusing errors.
+        skip_pg_entity_rels = _is_uc_native_assets(self._assets)
         for item in preview_items:
             if item.parent_path and item.parent_path in created_assets and item.path in created_assets:
                 rel_type = self._relationship_type_for(item.asset_type)
                 source_id = created_assets[item.parent_path]
                 target_id = created_assets[item.path]
+                relationship = AssetRelationshipCreate(
+                    source_asset_id=source_id,
+                    target_asset_id=target_id,
+                    relationship_type=rel_type,
+                    properties={
+                        "source_entity_type": path_to_type.get(item.parent_path, "asset"),
+                        "target_entity_type": item.asset_type,
+                        "source_type": path_to_type.get(item.parent_path, "asset"),
+                        "target_type": item.asset_type,
+                    },
+                )
+                if use_bulk_relationships:
+                    relationship_inputs.append(relationship)
+                    continue
                 try:
                     self._assets.add_relationship(
                         db,
-                        rel_in=AssetRelationshipCreate(
-                            source_asset_id=source_id,
-                            target_asset_id=target_id,
-                            relationship_type=rel_type,
-                        ),
+                        rel_in=relationship,
                         current_user_id=current_user_id,
                     )
                 except Exception as exc:
                     logger.debug(f"Relationship {item.parent_path} -> {item.path}: {exc}")
+
+                if skip_pg_entity_rels:
+                    continue
 
                 # Also write to entity_relationships so the detail page shows them
                 source_type = path_to_type.get(item.parent_path, "Asset")
@@ -423,18 +549,31 @@ class SchemaImportManager:
                 if item.parent_path is None and item.path in created_assets:
                     rel_type = self._relationship_type_for(item.asset_type)
                     target_id = created_assets[item.path]
+                    relationship = AssetRelationshipCreate(
+                        source_asset_id=system_asset_id,
+                        target_asset_id=target_id,
+                        relationship_type=rel_type,
+                        properties={
+                            "source_entity_type": "System",
+                            "target_entity_type": item.asset_type,
+                            "source_type": "System",
+                            "target_type": item.asset_type,
+                        },
+                    )
+                    if use_bulk_relationships:
+                        relationship_inputs.append(relationship)
+                        continue
                     try:
                         self._assets.add_relationship(
                             db,
-                            rel_in=AssetRelationshipCreate(
-                                source_asset_id=system_asset_id,
-                                target_asset_id=target_id,
-                                relationship_type=rel_type,
-                            ),
+                            rel_in=relationship,
                             current_user_id=current_user_id,
                         )
                     except Exception as exc:
                         logger.debug(f"System -> {item.path} relationship: {exc}")
+
+                    if skip_pg_entity_rels:
+                        continue
 
                     try:
                         existing = db.query(EntityRelationshipDb).filter(
@@ -456,6 +595,20 @@ class SchemaImportManager:
                             db.flush()
                     except Exception as exc:
                         logger.debug(f"Entity relationship System -> {item.path}: {exc}")
+
+        if relationship_inputs:
+            try:
+                self._assets.add_relationships_bulk(
+                    relationship_inputs,
+                    current_user_id=current_user_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to bulk-create %s imported asset relationships: %s",
+                    len(relationship_inputs),
+                    exc,
+                    exc_info=True,
+                )
 
         return result
 
@@ -510,22 +663,22 @@ class SchemaImportManager:
         current_user_id: str,
     ) -> Optional[UUID]:
         """Return the System asset id for a connection, creating one if needed."""
-        conn_db = connections_repo.get(db, connection_id)
+        conn_db = self._get_connection_record(db, connection_id)
         if conn_db is None:
             return None
 
         if conn_db.system_asset_id:
-            existing = asset_repo.get(db, conn_db.system_asset_id)
+            existing = self._lookup_asset_by_id(db, conn_db.system_asset_id)
             if existing:
-                return existing.id
+                return existing.id if hasattr(existing, "id") else UUID(str(existing.id))
 
-        system_type_db = asset_type_repo.get_by_name(db, name="System")
+        system_type_db = self._lookup_asset_type(db, "System")
         if not system_type_db:
             logger.warning("Ontos asset type 'System' not found — skipping System creation")
             return None
 
         # Check if a System asset already exists for this platform + connection name
-        existing = asset_repo.get_by_identity(
+        existing = self._lookup_asset_by_identity(
             db,
             name=conn_db.name,
             asset_type_id=system_type_db.id,
@@ -533,8 +686,7 @@ class SchemaImportManager:
             location=connector.connector_type,
         )
         if existing:
-            conn_db.system_asset_id = existing.id
-            db.flush()
+            self._set_connection_system_asset(db, connection_id, existing.id)
             return existing.id
 
         system_asset = self._assets.create_asset(
@@ -550,8 +702,7 @@ class SchemaImportManager:
             ),
             current_user_id=current_user_id,
         )
-        conn_db.system_asset_id = system_asset.id
-        db.flush()
+        self._set_connection_system_asset(db, connection_id, system_asset.id)
         logger.info(f"Created System asset '{conn_db.name}' (id={system_asset.id}) for connection {connection_id}")
         return system_asset.id
 
@@ -562,22 +713,22 @@ class SchemaImportManager:
         connector: AssetConnector,
     ) -> Optional[ImportPreviewItem]:
         """Build a read-only preview item for the System asset (no creation)."""
-        conn_db = connections_repo.get(db, connection_id)
+        conn_db = self._get_connection_record(db, connection_id)
         if conn_db is None:
             return None
 
-        system_type_db = asset_type_repo.get_by_name(db, name="System")
+        system_type_db = self._lookup_asset_type(db, "System")
         if not system_type_db:
             return None
 
         # Check if already linked or exists by identity
         existing_id: Optional[UUID] = None
         if conn_db.system_asset_id:
-            existing = asset_repo.get(db, conn_db.system_asset_id)
+            existing = self._lookup_asset_by_id(db, conn_db.system_asset_id)
             if existing:
                 existing_id = existing.id
         if not existing_id:
-            existing = asset_repo.get_by_identity(
+            existing = self._lookup_asset_by_identity(
                 db,
                 name=conn_db.name,
                 asset_type_id=system_type_db.id,
@@ -622,7 +773,7 @@ class SchemaImportManager:
 
         def _get_asset_type_db(type_name: str):
             if type_name not in _type_cache:
-                _type_cache[type_name] = asset_type_repo.get_by_name(db, name=type_name)
+                _type_cache[type_name] = self._lookup_asset_type(db, type_name)
             return _type_cache[type_name]
 
         metadata = None
@@ -643,7 +794,7 @@ class SchemaImportManager:
                 at_db = _get_asset_type_db(ontos_type_name)
                 existing = None
                 if at_db:
-                    existing = asset_repo.get_by_identity(
+                    existing = self._lookup_asset_by_identity(
                         db, name=metadata.name, asset_type_id=at_db.id,
                         platform=platform, location=path,
                     )
@@ -667,7 +818,7 @@ class SchemaImportManager:
                             continue
                         col_existing = None
                         if col_type_db:
-                            col_existing = asset_repo.get_by_identity(
+                            col_existing = self._lookup_asset_by_identity(
                                 db, name=col.name, asset_type_id=col_type_db.id,
                                 platform=platform, location=col_path,
                             )
@@ -736,20 +887,19 @@ class SchemaImportManager:
             except Exception as exc:
                 logger.debug(f"Cannot list containers at '{path}': {exc}")
 
-    def _create_asset_from_item(
+    def _build_asset_input_from_item(
         self,
         db: Session,
         connector: AssetConnector,
         item: ImportPreviewItem,
-        current_user_id: str,
         _type_cache: Optional[Dict[str, Any]] = None,
         _metadata_cache: Optional[Dict[str, Any]] = None,
-    ):
-        """Create a single Ontos asset from a preview item."""
+    ) -> AssetCreate:
+        """Build an Ontos asset payload from a preview item."""
         if _type_cache is not None and item.asset_type in _type_cache:
             asset_type_db = _type_cache[item.asset_type]
         else:
-            asset_type_db = asset_type_repo.get_by_name(db, name=item.asset_type)
+            asset_type_db = self._lookup_asset_type(db, item.asset_type)
             if _type_cache is not None:
                 _type_cache[item.asset_type] = asset_type_db
         if not asset_type_db:
@@ -810,7 +960,7 @@ class SchemaImportManager:
             except Exception as exc:
                 logger.debug(f"Could not fetch metadata for '{item.path}': {exc}")
 
-        asset_in = AssetCreate(
+        return AssetCreate(
             name=item.name,
             description=description,
             asset_type_id=asset_type_db.id,
@@ -820,7 +970,28 @@ class SchemaImportManager:
             status=AssetStatus.ACTIVE,
         )
 
-        return self._assets.create_asset(db, asset_in=asset_in, current_user_id=current_user_id)
+    def _create_asset_from_item(
+        self,
+        db: Session,
+        connector: AssetConnector,
+        item: ImportPreviewItem,
+        current_user_id: str,
+        _type_cache: Optional[Dict[str, Any]] = None,
+        _metadata_cache: Optional[Dict[str, Any]] = None,
+    ):
+        """Create a single Ontos asset from a preview item."""
+        asset_in = self._build_asset_input_from_item(
+            db=db,
+            connector=connector,
+            item=item,
+            _type_cache=_type_cache,
+            _metadata_cache=_metadata_cache,
+        )
+        return self._assets.create_asset(
+            db,
+            asset_in=asset_in,
+            current_user_id=current_user_id,
+        )
 
     @staticmethod
     def _find_column_in_cache(

@@ -113,7 +113,7 @@ export default function RunConfigDialog({
       // Endpoint returns BOTH DB-backed customer models and file/schema
       // taxonomies under `semantic_models`. Only customer models are valid as
       // `ontology_contexts`; shipped taxonomies use the opt-in checkboxes.
-      const all = res.data?.semantic_models ?? [];
+      const all = Array.isArray(res.data?.semantic_models) ? res.data.semantic_models : [];
       const customer = all.filter((m) => isCustomerModel(m) && m.enabled !== false);
       setModels(customer);
       // Out-of-the-box ergonomics: when the user has zero customer ontologies

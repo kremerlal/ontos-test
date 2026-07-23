@@ -175,6 +175,38 @@ class DeltaStore:
             self.execute(f"INSERT INTO {fqn} ({col_list}) VALUES ({values})")
         return row_id
 
+    def insert_rows(
+        self,
+        table_name: str,
+        rows: List[Dict[str, Any]],
+        *,
+        chunk_size: int = 50,
+    ) -> None:
+        """Insert new rows in chunks without per-row existence queries."""
+        if table_name not in APP_TABLES:
+            raise ValueError(f"Unknown table: {table_name}")
+        if not rows:
+            return
+
+        columns = [column[0] for column in APP_TABLES[table_name]]
+        fqn = self.table_fqn(table_name)
+        col_list = ", ".join(columns)
+        # Cap keeps SQL statement size manageable for wide snapshot_json rows.
+        safe_chunk_size = max(1, min(int(chunk_size), 100))
+
+        for start in range(0, len(rows), safe_chunk_size):
+            value_groups = []
+            for row in rows[start : start + safe_chunk_size]:
+                row.setdefault("updated_at", _utc_now())
+                if "etag" in columns:
+                    row.setdefault("etag", str(uuid.uuid4()))
+                value_groups.append(
+                    "(" + ", ".join(_sql_literal(row.get(column)) for column in columns) + ")"
+                )
+            self.execute(
+                f"INSERT INTO {fqn} ({col_list}) VALUES " + ", ".join(value_groups)
+            )
+
     def upsert_setting(self, key: str, value: str) -> None:
         existing = self.query(
             f"SELECT `key` FROM {self.table_fqn('app_settings')} "

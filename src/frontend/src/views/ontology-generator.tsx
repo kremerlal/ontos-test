@@ -147,13 +147,17 @@ export default function OntologyGeneratorView() {
     setIsLoadingConnections(true);
     try {
       const resp = await apiGet<Connection[]>('/api/connections');
-      if (resp.data) {
-        const enabled = resp.data.filter((c) => c.enabled);
-        setConnections(enabled);
-        if (enabled.length === 1) setSelectedConnectionId(enabled[0].id);
+      if (resp.error) {
+        throw new Error(resp.error);
       }
+      // useApi returns data: {} on many failure paths — only accept a real array.
+      const rows = Array.isArray(resp.data) ? resp.data : [];
+      const enabled = rows.filter((c) => c.enabled);
+      setConnections(enabled);
+      if (enabled.length === 1) setSelectedConnectionId(enabled[0].id);
     } catch (err) {
       console.error('Failed to fetch connections:', err);
+      setConnections([]);
     } finally {
       setIsLoadingConnections(false);
     }
@@ -166,17 +170,20 @@ export default function OntologyGeneratorView() {
   const fetchRuns = useCallback(async () => {
     try {
       const resp = await apiGet<{ runs: RunSummary[] }>('/api/ontology/runs?limit=20');
-      if (resp.data?.runs) {
-        setRuns(resp.data.runs);
-        // If there's a running run and we're not already polling, resume
-        const running = resp.data.runs.find((r) => r.status === 'running' || r.status === 'pending');
-        if (running && !activeRunId) {
-          setActiveRunId(running.run_id);
-          setProgressMessage(running.progress_message || null);
-        }
+      if (resp.error) {
+        throw new Error(resp.error);
+      }
+      const runsList = Array.isArray(resp.data?.runs) ? resp.data.runs : [];
+      setRuns(runsList);
+      // If there's a running run and we're not already polling, resume
+      const running = runsList.find((r) => r.status === 'running' || r.status === 'pending');
+      if (running && !activeRunId) {
+        setActiveRunId(running.run_id);
+        setProgressMessage(running.progress_message || null);
       }
     } catch (err) {
       console.error('Failed to fetch runs:', err);
+      setRuns([]);
     }
   }, [apiGet, activeRunId]);
 

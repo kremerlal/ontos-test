@@ -239,7 +239,9 @@ export function AddRelationshipDialog({
         `/api/ontology/entity-types/relationships?type_iri=${encodeURIComponent(iri)}&lang=${encodeURIComponent(i18n.language)}`
       );
       if (!response.error && response.data) {
-        setValidRelationships(response.data.outgoing);
+        setValidRelationships(
+          Array.isArray(response.data.outgoing) ? response.data.outgoing : [],
+        );
       }
     } catch { /* non-critical */ }
     finally { setRelTypesLoading(false); }

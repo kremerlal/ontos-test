@@ -110,7 +110,15 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
 
     app.state.data_products_manager = UcNativeDataProductsManager(entities)
     app.state.data_contracts_manager = UcNativeDataContractsManager(entities)
-    app.state.assets_manager = UcNativeAssetsManager(entities)
+    assets_manager = UcNativeAssetsManager(entities, overlays=overlays)
+    try:
+        seeded = assets_manager.ensure_default_asset_types()
+        if seeded:
+            logger.info("Seeded %s default Ontos asset types for UC-native", seeded)
+    except Exception as exc:
+        health.setdefault("warnings", []).append(f"Asset type seed failed: {exc}")
+        logger.warning("Failed to seed UC-native asset types: %s", exc, exc_info=True)
+    app.state.assets_manager = assets_manager
     app.state.data_domain_manager = UcNativeDataDomainManager(entities)
     app.state.tags_manager = UcNativeTagsManager(entities)
     connections_manager = UcNativeConnectionsManager(entities, workspace_client=ws_client)
@@ -140,10 +148,71 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
     try:
         semantic = UcNativeSemanticStore(store, ws_client, settings)
         app.state.uc_native_semantic = semantic
-        app.state.semantic_models_manager = UcNativeSemanticModelsManager(semantic)
+        from pathlib import Path as _Path
+
+        semantic_manager = UcNativeSemanticModelsManager(
+            semantic,
+            data_dir=_Path(__file__).resolve().parents[2] / "data",
+        )
+        app.state.semantic_models_manager = semantic_manager
+
+        # Ontology schema (reads in-memory RDF graph) — required by Entity Relationships UI.
+        try:
+            from src.controller.ontology_schema_manager import OntologySchemaManager
+
+            osm = OntologySchemaManager(semantic_models_manager=semantic_manager)
+            app.state.ontology_schema_manager = osm
+            if hasattr(app.state.assets_manager, "_ontology"):
+                app.state.assets_manager._ontology = osm
+            logger.info("OntologySchemaManager initialized for UC-native")
+        except Exception as exc:
+            health.setdefault("warnings", []).append(f"OntologySchemaManager unavailable: {exc}")
+            logger.warning("UC native OntologySchemaManager failed: %s", exc, exc_info=True)
+
+        # Term Mapping — list endpoints work with NoOp DB (empty); create needs Lakebase
+        # or future UC tables, but wiring the manager avoids 503 / confusing 500s.
+        try:
+            from src.controller.term_mapping_manager import TermMappingManager
+
+            app.state.term_mapping_manager = TermMappingManager(
+                semantic_models_manager=semantic_manager,
+                reviews_manager=None,
+                notifications_manager=app.state.notifications_manager,
+            )
+            logger.info("TermMappingManager initialized for UC-native")
+        except Exception as exc:
+            health.setdefault("warnings", []).append(f"TermMappingManager unavailable: {exc}")
+            logger.warning("UC native TermMappingManager failed: %s", exc, exc_info=True)
     except Exception as exc:
         health.setdefault("warnings", []).append(f"UC semantic store unavailable: {exc}")
         logger.warning("UC native semantic store failed: %s", exc, exc_info=True)
+
+    # Ontology Generator is settings-only (LLM) — no Postgres required.
+    try:
+        from src.controller.ontology_generator_manager import OntologyGeneratorManager
+
+        app.state.ontology_generator_manager = OntologyGeneratorManager(settings=settings)
+        logger.info("OntologyGeneratorManager initialized for UC-native")
+    except Exception as exc:
+        health.setdefault("warnings", []).append(f"OntologyGeneratorManager unavailable: {exc}")
+        logger.warning("UC native OntologyGeneratorManager failed: %s", exc, exc_info=True)
+
+    # Entity Relationships — Delta overlays as SoR (schema import writes here).
+    try:
+        from src.common.uc_native.entity_relationships_manager import (
+            UcNativeEntityRelationshipsManager,
+        )
+
+        app.state.entity_relationships_manager = UcNativeEntityRelationshipsManager(
+            overlays,
+            ontology_schema_manager=getattr(app.state, "ontology_schema_manager", None),
+            assets_manager=assets_manager,
+            entities=entities,
+        )
+        logger.info("UcNativeEntityRelationshipsManager initialized")
+    except Exception as exc:
+        health.setdefault("warnings", []).append(f"EntityRelationshipsManager unavailable: {exc}")
+        logger.warning("UC native EntityRelationshipsManager failed: %s", exc, exc_info=True)
 
     app.state.uc_native_store = store
     app.state.uc_native_entities = entities

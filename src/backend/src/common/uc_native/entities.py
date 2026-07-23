@@ -44,6 +44,28 @@ class UcNativeEntityStore:
         self._store.merge_row(table_name, row)
         return payload
 
+    def create_entities(
+        self,
+        table_name: str,
+        entries: List[tuple[Dict[str, Any], Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        """Insert known-new entities with chunked Delta statements."""
+        rows: List[Dict[str, Any]] = []
+        payloads: List[Dict[str, Any]] = []
+        for payload, index_fields in entries:
+            entity_id = str(payload.get("id") or uuid.uuid4())
+            payload["id"] = entity_id
+            payloads.append(payload)
+            rows.append(
+                {
+                    "id": entity_id,
+                    "snapshot_json": json.dumps(payload, default=str),
+                    **index_fields,
+                }
+            )
+        self._store.insert_rows(table_name, rows)
+        return payloads
+
     def delete_entity(self, table_name: str, entity_id: str) -> None:
         self._store.delete_by_id(table_name, entity_id)
 

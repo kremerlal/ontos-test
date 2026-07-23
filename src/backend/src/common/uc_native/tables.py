@@ -41,6 +41,16 @@ ENTITY_TABLES: Dict[str, List[ColumnSpec]] = {
         ("etag", ColumnTypeName.STRING),
         ("snapshot_json", ColumnTypeName.STRING),
     ],
+    "asset_types": [
+        ("id", ColumnTypeName.STRING),
+        ("name", ColumnTypeName.STRING),
+        ("category", ColumnTypeName.STRING),
+        ("is_system", ColumnTypeName.BOOLEAN),
+        ("status", ColumnTypeName.STRING),
+        ("updated_at", ColumnTypeName.STRING),
+        ("etag", ColumnTypeName.STRING),
+        ("snapshot_json", ColumnTypeName.STRING),
+    ],
     "data_domains": [
         ("id", ColumnTypeName.STRING),
         ("name", ColumnTypeName.STRING),
