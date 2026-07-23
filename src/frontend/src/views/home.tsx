@@ -48,8 +48,14 @@ export default function Home() {
       return (r?.home_sections || []) as HomeSection[];
     }
     if (Array.isArray(userGroups) && userGroups.length > 0) {
-      const groupSet = new Set<string>(userGroups as string[]);
-      const matched = availableRoles.filter(r => Array.isArray(r.assigned_groups) && r.assigned_groups.some(g => groupSet.has(g)));
+      const groupSet = new Set<string>(
+        (userGroups as string[]).map((g) => g.toLowerCase())
+      );
+      const matched = availableRoles.filter(
+        (r) =>
+          Array.isArray(r.assigned_groups) &&
+          r.assigned_groups.some((g) => groupSet.has(String(g).toLowerCase()))
+      );
       const union = new Set<HomeSection>();
       matched.forEach(r => (r.home_sections || []).forEach(s => union.add(s as HomeSection)));
       const order: HomeSection[] = [HomeSection.REQUIRED_ACTIONS, HomeSection.DATA_CURATION, HomeSection.DISCOVERY];

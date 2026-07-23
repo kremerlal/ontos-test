@@ -9,9 +9,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
 
-from src.common.database import get_db
 from src.common.dependencies import (
     AuditCurrentUserDep,
     AuditManagerDep,
@@ -43,14 +41,17 @@ FEATURE_ID = "schema-importer"
 # Dependency: build SchemaImportManager per request
 # ------------------------------------------------------------------
 
-def _get_manager(request: Request, db: Session = Depends(get_db)) -> SchemaImportManager:
+def _get_manager(request: Request, db: DBSessionDep) -> SchemaImportManager:
     settings = get_settings()
     ws = None
     try:
         ws = get_obo_workspace_client(request, settings)
     except Exception:
         pass
-    connections_mgr = ConnectionsManager(db=db, workspace_client=ws)
+
+    connections_mgr = getattr(request.app.state, "connections_manager", None)
+    if connections_mgr is None:
+        connections_mgr = ConnectionsManager(db=db, workspace_client=ws)
 
     from src.common.manager_dependencies import get_assets_manager
     assets_mgr = get_assets_manager(request)

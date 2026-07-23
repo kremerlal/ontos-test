@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.catalog import ColumnInfo, ColumnTypeName, DataSourceFormat, TableType
+from databricks.sdk.service.catalog import ColumnTypeName
 
 from src.common.config import Settings
 from src.common.logging import get_logger
@@ -20,6 +20,20 @@ logger = get_logger(__name__)
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sql_type(column_type: ColumnTypeName) -> str:
+    mapping = {
+        ColumnTypeName.STRING: "STRING",
+        ColumnTypeName.BOOLEAN: "BOOLEAN",
+        ColumnTypeName.INT: "INT",
+        ColumnTypeName.LONG: "BIGINT",
+        ColumnTypeName.DOUBLE: "DOUBLE",
+        ColumnTypeName.FLOAT: "FLOAT",
+        ColumnTypeName.TIMESTAMP: "TIMESTAMP",
+        ColumnTypeName.DATE: "DATE",
+    }
+    return mapping.get(column_type, "STRING")
 
 
 def _sql_literal(value: Any) -> str:
@@ -72,18 +86,15 @@ class DeltaStore:
                 self._ws.tables.get(fqn)
             except Exception:
                 columns: List[ColumnSpec] = APP_TABLES[table_name]
-                col_infos = [
-                    ColumnInfo(name=c[0], type_name=c[1], nullable=True, comment=None)
+                # Catalog TablesAPI.create only supports EXTERNAL tables and
+                # rejects comment/MANAGED — use warehouse DDL for managed Delta.
+                col_defs = ", ".join(
+                    f"`{sanitize_uc_identifier(c[0])}` {_sql_type(c[1])}"
                     for c in columns
-                ]
-                self._ws.tables.create(
-                    name=table_name,
-                    catalog_name=catalog,
-                    schema_name=schema,
-                    table_type=TableType.MANAGED,
-                    data_source_format=DataSourceFormat.DELTA,
-                    columns=col_infos,
-                    comment=f"Ontos uc_native: {table_name}",
+                )
+                self.execute(
+                    f"CREATE TABLE IF NOT EXISTS {fqn} ({col_defs}) USING DELTA "
+                    f"COMMENT 'Ontos uc_native: {sanitize_uc_identifier(table_name)}'"
                 )
                 logger.info("Created UC app table %s", fqn)
             created.append(fqn)

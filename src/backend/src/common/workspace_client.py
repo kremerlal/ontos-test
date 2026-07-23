@@ -212,6 +212,14 @@ class CachingWorkspaceClient(WorkspaceClient):
                     lambda: self._parent._client.schemas.get(full_name=full_name)
                 )()
 
+            def create(self, name: str, catalog_name: str, **kwargs):
+                """Create a schema — delegates to client and clears list cache."""
+                result = self._parent._client.schemas.create(
+                    name=name, catalog_name=catalog_name, **kwargs
+                )
+                self._parent.clear_cache(f'schemas.list::{catalog_name}')
+                return result
+
         return CachedSchemas(self)
 
     @property
@@ -237,6 +245,19 @@ class CachingWorkspaceClient(WorkspaceClient):
                         lambda: self._parent._client.tables.get(full_name=full_name, **kwargs)
                     )()
                 return self._parent._client.tables.get(**kwargs)
+
+            def create(self, name: str, catalog_name: str, schema_name: str, **kwargs):
+                """Create a table — delegates to client and clears list/get caches."""
+                result = self._parent._client.tables.create(
+                    name=name,
+                    catalog_name=catalog_name,
+                    schema_name=schema_name,
+                    **kwargs,
+                )
+                self._parent.clear_cache(f'tables.list::{catalog_name}::{schema_name}')
+                fqn = f"{catalog_name}.{schema_name}.{name}"
+                self._parent.clear_cache(f'tables.get::{fqn}')
+                return result
 
         return CachedTables(self)
 

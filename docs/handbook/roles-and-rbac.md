@@ -156,7 +156,7 @@ access to Settings does not implicitly turn on admin-only capabilities
 elsewhere.
 
 Group assignment for Admin is seeded from the `APP_ADMIN_DEFAULT_GROUPS`
-environment variable (default: `["admins"]`). This is **only consulted
+environment variable (default: `["admins", "users"]`). This is **only consulted
 on first-time seeding** — later restarts do not re-merge env-var values
 into the existing role. To add admins after first start, edit the
 role's `assigned_groups` from Settings → RBAC. This catches new
@@ -329,7 +329,7 @@ in order:
 #### Workspace-admin shortcut {#workspace-admin-shortcut}
 
 The `is_user_admin` helper checks membership in
-`APP_ADMIN_DEFAULT_GROUPS` (default `["admins"]`). This bypass runs
+`APP_ADMIN_DEFAULT_GROUPS` (default `["admins", "users"]`). This bypass runs
 **independently of the Ontos role system** — a workspace admin is
 treated as admin for cascade-bypass checks even if they hold no Ontos
 role.

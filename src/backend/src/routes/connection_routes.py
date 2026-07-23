@@ -2,13 +2,11 @@
 CRUD routes for external data platform connections.
 """
 
-from typing import Optional
+from typing import Optional, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, Body
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 
-from ..common.database import get_db
 from ..common.dependencies import (
     DBSessionDep,
     AuditManagerDep,
@@ -20,7 +18,7 @@ from ..common.logging import get_logger
 from ..common.authorization import PermissionChecker
 from ..common.features import FeatureAccessLevel
 from ..controller.connections_manager import ConnectionsManager
-from ..models.connections import ConnectionCreate, ConnectionUpdate, ConnectionResponse
+from ..models.connections import ConnectionCreate, ConnectionUpdate
 
 logger = get_logger(__name__)
 
@@ -28,8 +26,18 @@ router = APIRouter(prefix="/api", tags=["Connections"])
 
 FEATURE_ID = "settings-connectors"
 
+ConnectionsManagerLike = Union[ConnectionsManager, object]
 
-def _get_manager(db: Session = Depends(get_db)) -> ConnectionsManager:
+
+def _get_manager(
+    request: Request,
+    db: DBSessionDep,
+) -> ConnectionsManagerLike:
+    """Prefer app-state manager (UC-native Delta) over a per-request Postgres manager."""
+    existing = getattr(request.app.state, "connections_manager", None)
+    if existing is not None:
+        return existing
+
     settings = get_settings()
     ws = None
     try:
@@ -46,7 +54,7 @@ def _get_manager(db: Session = Depends(get_db)) -> ConnectionsManager:
 @router.get("/connections")
 async def list_connections(
     connector_type: Optional[str] = None,
-    manager: ConnectionsManager = Depends(_get_manager),
+    manager: ConnectionsManagerLike = Depends(_get_manager),
     _: bool = Depends(PermissionChecker(FEATURE_ID, FeatureAccessLevel.READ_ONLY)),
 ):
     """List all connections, optionally filtered by connector type."""
@@ -55,7 +63,7 @@ async def list_connections(
 
 @router.get("/connections/types")
 async def list_connector_types(
-    manager: ConnectionsManager = Depends(_get_manager),
+    manager: ConnectionsManagerLike = Depends(_get_manager),
     _: bool = Depends(PermissionChecker(FEATURE_ID, FeatureAccessLevel.READ_ONLY)),
 ):
     """List available connector types with metadata and config field hints."""
@@ -65,7 +73,7 @@ async def list_connector_types(
 @router.get("/connections/{connection_id}")
 async def get_connection(
     connection_id: UUID,
-    manager: ConnectionsManager = Depends(_get_manager),
+    manager: ConnectionsManagerLike = Depends(_get_manager),
     _: bool = Depends(PermissionChecker(FEATURE_ID, FeatureAccessLevel.READ_ONLY)),
 ):
     """Get a single connection by ID."""
@@ -80,7 +88,7 @@ async def create_connection(
     payload: ConnectionCreate,
     background_tasks: BackgroundTasks,
     request: Request,
-    manager: ConnectionsManager = Depends(_get_manager),
+    manager: ConnectionsManagerLike = Depends(_get_manager),
     audit_manager: AuditManagerDep = None,
     current_user: AuditCurrentUserDep = None,
     _: bool = Depends(PermissionChecker(FEATURE_ID, FeatureAccessLevel.READ_WRITE)),
@@ -113,7 +121,7 @@ async def update_connection(
     payload: ConnectionUpdate,
     background_tasks: BackgroundTasks,
     request: Request,
-    manager: ConnectionsManager = Depends(_get_manager),
+    manager: ConnectionsManagerLike = Depends(_get_manager),
     audit_manager: AuditManagerDep = None,
     current_user: AuditCurrentUserDep = None,
     _: bool = Depends(PermissionChecker(FEATURE_ID, FeatureAccessLevel.READ_WRITE)),
@@ -140,7 +148,7 @@ async def delete_connection(
     connection_id: UUID,
     background_tasks: BackgroundTasks,
     request: Request,
-    manager: ConnectionsManager = Depends(_get_manager),
+    manager: ConnectionsManagerLike = Depends(_get_manager),
     audit_manager: AuditManagerDep = None,
     current_user: AuditCurrentUserDep = None,
     _: bool = Depends(PermissionChecker(FEATURE_ID, FeatureAccessLevel.ADMIN)),
@@ -172,7 +180,7 @@ async def delete_connection(
 @router.post("/connections/{connection_id}/test")
 async def test_connection(
     connection_id: UUID,
-    manager: ConnectionsManager = Depends(_get_manager),
+    manager: ConnectionsManagerLike = Depends(_get_manager),
     _: bool = Depends(PermissionChecker(FEATURE_ID, FeatureAccessLevel.READ_WRITE)),
 ):
     """Test connectivity for a specific connection."""

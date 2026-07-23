@@ -43,11 +43,17 @@ export default function ConnectorsSettings() {
     setIsLoading(true);
     try {
       const response = await apiGet<Connection[]>('/api/connections');
-      if (response.data) {
+      if (response.error) {
+        console.error('Failed to fetch connections:', response.error);
+        setConnections([]);
+      } else if (Array.isArray(response.data)) {
         setConnections(response.data);
+      } else {
+        setConnections([]);
       }
     } catch (error) {
       console.error('Failed to fetch connections:', error);
+      setConnections([]);
     } finally {
       setIsLoading(false);
     }

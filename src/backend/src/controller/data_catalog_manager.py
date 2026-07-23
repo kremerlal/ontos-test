@@ -12,7 +12,7 @@ Data sources are merged and deduplicated: Asset (physical) metadata is the base,
 Contract metadata enriches with business context.
 """
 
-from typing import List, Optional, Dict, Any, Tuple
+from typing import Any, List, Optional, Dict, Tuple
 from sqlalchemy.orm import Session, selectinload
 
 from databricks.sdk import WorkspaceClient
@@ -61,11 +61,13 @@ class DataCatalogManager:
         obo_client: WorkspaceClient,
         db_session: Optional[Session],
         contracts_manager: Optional[DataContractsManager] = None,
+        assets_manager: Optional[Any] = None,
         settings: Optional[Settings] = None
     ):
         self.client = obo_client
         self.db = db_session
         self.contracts_manager = contracts_manager
+        self.assets_manager = assets_manager
         self.settings = settings
         self.lineage_service = LineageService(obo_client)
 
@@ -83,8 +85,7 @@ class DataCatalogManager:
         columns_map: Dict[Tuple[str, str], ColumnDictionaryEntry] = {}
 
         if not self.db:
-            logger.warning("Database session not available")
-            return []
+            return self._get_columns_from_uc_native_contracts()
 
         try:
             db_contracts = (
@@ -176,6 +177,79 @@ class DataCatalogManager:
 
         return columns
 
+    def _get_columns_from_uc_native_contracts(self) -> List[ColumnDictionaryEntry]:
+        """Extract columns from UC-native contract documents (Delta SoR)."""
+        columns: List[ColumnDictionaryEntry] = []
+        mgr = self.contracts_manager
+        if mgr is None or not hasattr(mgr, "list_contracts"):
+            return columns
+        try:
+            docs = mgr.list_contracts(limit=500)
+        except Exception as e:
+            logger.warning("UC-native contract list failed: %s", e)
+            return columns
+
+        for doc in docs or []:
+            if not isinstance(doc, dict):
+                continue
+            contract_id = str(doc.get("id", ""))
+            contract_name = doc.get("name") or "contract"
+            contract_version = str(doc.get("version") or "1.0")
+            contract_status = doc.get("status")
+            schema_objects = (
+                doc.get("schema")
+                or doc.get("schema_objects")
+                or doc.get("objects")
+                or []
+            )
+            if isinstance(schema_objects, dict):
+                schema_objects = schema_objects.get("objects") or schema_objects.get("tables") or []
+            for schema_obj in schema_objects:
+                if not isinstance(schema_obj, dict):
+                    continue
+                schema_name = schema_obj.get("name") or "unknown"
+                properties = (
+                    schema_obj.get("properties")
+                    or schema_obj.get("columns")
+                    or schema_obj.get("fields")
+                    or []
+                )
+                for idx, prop in enumerate(properties):
+                    if not isinstance(prop, dict):
+                        continue
+                    col_name = prop.get("name") or "unknown"
+                    col_type = (
+                        prop.get("physicalType")
+                        or prop.get("physical_type")
+                        or prop.get("logicalType")
+                        or prop.get("logical_type")
+                        or prop.get("type")
+                        or "unknown"
+                    )
+                    table_full_name = f"{contract_name}.{schema_name}"
+                    columns.append(
+                        ColumnDictionaryEntry(
+                            column_name=col_name,
+                            column_label=prop.get("businessName") or prop.get("business_name"),
+                            column_type=str(col_type),
+                            description=prop.get("description") or prop.get("comment"),
+                            nullable=not bool(prop.get("required", False)),
+                            position=idx,
+                            table_name=schema_name,
+                            table_full_name=table_full_name,
+                            schema_name=contract_name,
+                            catalog_name=contract_version,
+                            table_type="CONTRACT",
+                            source="contract",
+                            contract_id=contract_id or None,
+                            contract_name=contract_name,
+                            contract_version=contract_version,
+                            contract_status=contract_status,
+                        )
+                    )
+        logger.info("Extracted %s columns from UC-native contracts", len(columns))
+        return columns
+
     # =========================================================================
     # Column Extraction: Assets
     # =========================================================================
@@ -189,8 +263,7 @@ class DataCatalogManager:
         columns: List[ColumnDictionaryEntry] = []
 
         if not self.db:
-            logger.warning("Database session not available")
-            return []
+            return self._get_columns_from_uc_native_assets()
 
         try:
             # Get all table-like assets with their relationships eager-loaded
@@ -273,6 +346,234 @@ class DataCatalogManager:
             return []
 
         return columns
+
+    def _get_columns_from_uc_native_assets(self) -> List[ColumnDictionaryEntry]:
+        """Extract columns from UC-native asset documents (Delta SoR)."""
+        columns: List[ColumnDictionaryEntry] = []
+        mgr = self.assets_manager
+        if mgr is None or not hasattr(mgr, "list_assets"):
+            return columns
+        try:
+            docs = mgr.list_assets(limit=500)
+        except Exception as e:
+            logger.warning("UC-native asset list failed: %s", e)
+            return columns
+
+        for doc in docs or []:
+            if not isinstance(doc, dict):
+                continue
+            asset_type = (
+                doc.get("asset_type_name")
+                or doc.get("asset_type")
+                or "Table"
+            )
+            if str(asset_type) not in _TABLE_LIKE_TYPES and str(asset_type).lower() not in {
+                "table", "view", "dataset"
+            }:
+                continue
+
+            props = doc.get("properties") or {}
+            if not isinstance(props, dict):
+                props = {}
+            location = doc.get("location") or props.get("location") or ""
+            parts = [p for p in str(location).split(".") if p] if location else []
+            catalog_name = parts[0] if len(parts) >= 3 else (props.get("catalog") or "")
+            schema_name = parts[1] if len(parts) >= 3 else (props.get("schema") or "")
+            table_name = parts[2] if len(parts) >= 3 else (doc.get("name") or "unknown")
+            table_full_name = location or ".".join(
+                p for p in [catalog_name, schema_name, table_name] if p
+            ) or table_name
+
+            child_columns: List[Dict[str, Any]] = []
+            schema_blob = props.get("schema") if isinstance(props.get("schema"), dict) else {}
+            raw_cols = (
+                schema_blob.get("columns")
+                if isinstance(schema_blob, dict)
+                else None
+            ) or props.get("columns") or doc.get("columns") or []
+            for idx, c in enumerate(raw_cols):
+                if not isinstance(c, dict):
+                    continue
+                child_columns.append({
+                    "name": c.get("name", ""),
+                    "data_type": c.get("data_type") or c.get("type") or "",
+                    "logical_type": c.get("logical_type") or c.get("logicalType") or "string",
+                    "nullable": c.get("nullable", True),
+                    "description": c.get("description") or c.get("comment") or "",
+                    "is_partition_key": c.get("is_partition_key", False),
+                    "position": idx,
+                })
+
+            for idx, col_data in enumerate(child_columns):
+                columns.append(ColumnDictionaryEntry(
+                    column_name=col_data.get("name", "unknown"),
+                    column_label=None,
+                    column_type=col_data.get("data_type", "") or col_data.get("logical_type", "unknown"),
+                    description=col_data.get("description"),
+                    nullable=col_data.get("nullable", True),
+                    position=col_data.get("position", idx),
+                    table_name=table_name,
+                    table_full_name=table_full_name,
+                    schema_name=schema_name or "",
+                    catalog_name=catalog_name or "",
+                    table_type=str(asset_type).upper(),
+                    source="asset",
+                    asset_id=str(doc.get("id")) if doc.get("id") else None,
+                    is_primary_key=col_data.get("is_partition_key", False),
+                ))
+
+        logger.info("Extracted %s columns from UC-native assets", len(columns))
+        return columns
+
+    def _get_columns_from_live_uc(
+        self,
+        catalog_filter: Optional[str] = None,
+        schema_filter: Optional[str] = None,
+        table_filter: Optional[str] = None,
+        max_tables: int = 50,
+    ) -> List[ColumnDictionaryEntry]:
+        """Browse Unity Catalog columns via OBO when a catalog (and optional schema) is selected.
+
+        Avoids a full-workspace crawl: requires at least ``catalog_filter``.
+        """
+        if not catalog_filter or self.client is None:
+            return []
+
+        columns: List[ColumnDictionaryEntry] = []
+        try:
+            schemas: List[str] = []
+            if schema_filter:
+                schemas = [schema_filter]
+            else:
+                schemas = [
+                    s.name for s in self.client.schemas.list(catalog_name=catalog_filter)
+                ]
+
+            tables_seen = 0
+            for schema_name in schemas:
+                if tables_seen >= max_tables:
+                    break
+                try:
+                    tables = list(
+                        self.client.tables.list(
+                            catalog_name=catalog_filter, schema_name=schema_name
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed listing tables in %s.%s: %s",
+                        catalog_filter,
+                        schema_name,
+                        e,
+                    )
+                    continue
+
+                for table in tables:
+                    if tables_seen >= max_tables:
+                        break
+                    table_name = getattr(table, "name", None) or (
+                        table.get("name") if isinstance(table, dict) else None
+                    )
+                    if not table_name:
+                        continue
+                    if table_filter:
+                        fqn = f"{catalog_filter}.{schema_name}.{table_name}"
+                        if (
+                            table_filter.lower() != table_name.lower()
+                            and table_filter.lower() != fqn.lower()
+                        ):
+                            continue
+
+                    table_type = getattr(table, "table_type", None) or "TABLE"
+                    if isinstance(table, dict):
+                        table_type = table.get("table_type") or "TABLE"
+                    table_type_str = "VIEW" if str(table_type).upper() == "VIEW" else "TABLE"
+                    full_name = f"{catalog_filter}.{schema_name}.{table_name}"
+
+                    # Prefer columns already on the list response; else tables.get.
+                    col_iter = getattr(table, "columns", None)
+                    if col_iter is None and isinstance(table, dict):
+                        col_iter = table.get("columns")
+                    if not col_iter:
+                        try:
+                            tbl = self.client.tables.get(
+                                full_name=full_name
+                            ) if hasattr(self.client.tables, "get") else None
+                            if tbl is None:
+                                path = (
+                                    f"/api/2.1/unity-catalog/tables/"
+                                    f"{catalog_filter}.{schema_name}.{table_name}"
+                                )
+                                tbl = self.client.api_client.do("GET", path)
+                            col_iter = getattr(tbl, "columns", None)
+                            if col_iter is None and isinstance(tbl, dict):
+                                col_iter = tbl.get("columns")
+                        except Exception as e:
+                            logger.debug("tables.get failed for %s: %s", full_name, e)
+                            col_iter = []
+
+                    for idx, col in enumerate(col_iter or []):
+                        if isinstance(col, dict):
+                            col_name = col.get("name") or col.get("column_name")
+                            col_type = (
+                                col.get("type_text")
+                                or col.get("type_name")
+                                or col.get("data_type")
+                                or "string"
+                            )
+                            nullable = col.get("nullable", True)
+                            comment = col.get("comment")
+                        else:
+                            col_name = getattr(col, "name", None)
+                            col_type = (
+                                getattr(col, "type_text", None)
+                                or getattr(col, "type_name", None)
+                                or "string"
+                            )
+                            nullable = getattr(col, "nullable", True)
+                            comment = getattr(col, "comment", None)
+                        if not col_name:
+                            continue
+                        columns.append(
+                            ColumnDictionaryEntry(
+                                column_name=col_name,
+                                column_label=None,
+                                column_type=str(col_type),
+                                description=comment,
+                                nullable=bool(nullable) if nullable is not None else True,
+                                position=idx,
+                                table_name=table_name,
+                                table_full_name=full_name,
+                                schema_name=schema_name,
+                                catalog_name=catalog_filter,
+                                table_type=table_type_str,
+                                source="asset",
+                            )
+                        )
+                    tables_seen += 1
+
+            logger.info(
+                "Live UC browse: %s columns from %s tables in catalog=%s schema=%s",
+                len(columns),
+                tables_seen,
+                catalog_filter,
+                schema_filter or "*",
+            )
+        except Exception as e:
+            logger.error("Live UC column browse failed: %s", e, exc_info=True)
+            return []
+
+        return columns
+
+    def _list_live_uc_catalog_names(self) -> List[str]:
+        """Return catalog names visible to the OBO client (best-effort)."""
+        if self.client is None:
+            return []
+        try:
+            return [c.name for c in self.client.catalogs.list()]
+        except Exception as e:
+            logger.warning("Failed listing UC catalogs for hierarchy filters: %s", e)
+            return []
 
     def _get_asset_child_columns(self, asset: AssetDb) -> List[Dict[str, Any]]:
         """Get Column children of a table-like asset via hasColumn relationships.
@@ -436,6 +737,15 @@ class DataCatalogManager:
 
             all_columns = self._merge_columns(contract_columns, asset_columns)
 
+            # When Postgres is unavailable, also browse live UC for a selected catalog.
+            if not self.db and catalog_filter:
+                live_columns = self._get_columns_from_live_uc(
+                    catalog_filter=catalog_filter,
+                    schema_filter=schema_filter,
+                    table_filter=table_filter,
+                )
+                all_columns = self._merge_columns(all_columns, live_columns)
+
             # Apply filters
             filtered = self._apply_filters(
                 all_columns,
@@ -539,6 +849,14 @@ class DataCatalogManager:
             asset_columns = self._get_columns_from_assets()
             all_columns = self._merge_columns(contract_columns, asset_columns)
 
+            if not self.db and catalog_filter:
+                live_columns = self._get_columns_from_live_uc(
+                    catalog_filter=catalog_filter,
+                    schema_filter=schema_filter,
+                    table_filter=table_filter,
+                )
+                all_columns = self._merge_columns(all_columns, live_columns)
+
             # Apply faceted filters first
             filtered = self._apply_filters(
                 all_columns,
@@ -634,6 +952,10 @@ class DataCatalogManager:
                     catalogs.add(col.catalog_name)
                 if col.schema_name:
                     schemas.add(col.schema_name)
+
+            # Seed catalog filter options from live UC when SoR overlays are empty.
+            if not catalogs and not self.db:
+                catalogs.update(self._list_live_uc_catalog_names())
 
         except Exception as e:
             logger.error(f"Error computing hierarchy filters: {e}", exc_info=True)

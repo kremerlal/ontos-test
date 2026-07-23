@@ -133,11 +133,13 @@ export function ConnectionFormDialog({
     const fetchTypes = async () => {
       try {
         const response = await api.get<ConnectorTypeInfo[]>('/api/connections/types');
-        if (response.data) {
+        if (Array.isArray(response.data)) {
           setConnectorTypes(response.data);
+        } else {
+          setConnectorTypes([]);
         }
       } catch {
-        // ignore
+        setConnectorTypes([]);
       }
     };
     const fetchSystemAssets = async () => {
@@ -244,7 +246,7 @@ export function ConnectionFormDialog({
     }
   };
 
-  const availableTypes = connectorTypes.filter(ct =>
+  const availableTypes = (Array.isArray(connectorTypes) ? connectorTypes : []).filter(ct =>
     ct.connector_type !== 'databricks'
   );
 

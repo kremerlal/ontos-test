@@ -23,7 +23,7 @@ from src.common.features import FeatureAccessLevel
 from src.common.workspace_client import get_obo_workspace_client
 from src.common.config import get_settings, Settings
 from src.common.database import get_db
-from src.common.storage_mode import StorageMode, resolve_storage_mode
+from src.common.storage_mode import resolve_storage_mode
 from src.controller.data_catalog_manager import DataCatalogManager
 from src.controller.data_contracts_manager import DataContractsManager
 from src.models.data_catalog import (
@@ -44,9 +44,13 @@ DATA_CATALOG_FEATURE_ID = "data-catalog"
 
 
 def _get_optional_db() -> Generator[Optional[Session], None, None]:
-    """Yield no session in UC-only mode; otherwise delegate to app DB."""
+    """Yield no session when Postgres/Lakebase is not the SoR; otherwise delegate to app DB."""
+    from src.common.storage_mode import requires_oltp_database
+
     settings = get_settings()
-    if resolve_storage_mode(settings) == StorageMode.UC_READONLY:
+    mode = resolve_storage_mode(settings)
+    if not requires_oltp_database(mode):
+        # uc_native / uc_readonly — no SQLAlchemy session factory.
         yield None
         return
     yield from get_db()
@@ -63,11 +67,13 @@ def _get_manager(
     """Helper to create manager with all dependencies."""
     settings = getattr(request.app.state, 'settings', None)
     contracts_manager = getattr(request.app.state, 'data_contracts_manager', None)
+    assets_manager = getattr(request.app.state, 'assets_manager', None)
 
     return DataCatalogManager(
         obo_client=obo_client,
         db_session=db,
         contracts_manager=contracts_manager,
+        assets_manager=assets_manager,
         settings=settings,
     )
 

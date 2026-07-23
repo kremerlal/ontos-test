@@ -84,7 +84,7 @@ DB_POOL_TIMEOUT=10
 | `LOG_LEVEL` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` | No |
 | `LOG_FILE` | Path to log file | `/path/to/app.log` | No |
 | `APP_AUDIT_LOG_DIR` | Directory within `DATABRICKS_VOLUME` for audit logs | `audit_logs` | Yes |
-| `APP_ADMIN_DEFAULT_GROUPS` | JSON array of Databricks groups for default Admin role | `["admins", "superusers"]` | No |
+| `APP_ADMIN_DEFAULT_GROUPS` | JSON array of Databricks groups for default Admin role | `["admins", "users"]` | No |
 | `APP_DEMO_MODE` | Enable demo mode (loads sample data on startup) | `False` | No |
 | `APP_DB_DROP_ON_START` | **DANGER:** Drop and recreate database on startup | `False` | No |
 | `APP_DB_ECHO` | Log SQLAlchemy SQL statements (debugging) | `False` | No |
@@ -315,7 +315,7 @@ APP_AUDIT_LOG_DIR=audit_logs
 APP_DEMO_MODE=True
 
 # Optional: Default Admin Groups
-APP_ADMIN_DEFAULT_GROUPS=["admins"]
+APP_ADMIN_DEFAULT_GROUPS='["admins", "users"]'
 ```
 
 ---

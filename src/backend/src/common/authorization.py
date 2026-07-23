@@ -38,7 +38,7 @@ def is_user_admin(user_groups: Optional[List[str]], settings: Settings) -> bool:
     
     try:
         import json
-        admin_groups_str = settings.APP_ADMIN_DEFAULT_GROUPS or '["admins"]'
+        admin_groups_str = settings.APP_ADMIN_DEFAULT_GROUPS or '["admins", "users"]'
         admin_groups = json.loads(admin_groups_str)
         
         # Check if any user group matches any admin group (case-insensitive)
@@ -49,7 +49,10 @@ def is_user_admin(user_groups: Optional[List[str]], settings: Settings) -> bool:
     except (json.JSONDecodeError, Exception) as e:
         logger.error("Error parsing APP_ADMIN_DEFAULT_GROUPS: %s", e)
         # Fallback to simple check
-        return "admins" in [g.lower() for g in user_groups]
+        return any(
+            group in {"admins", "users"}
+            for group in (g.lower() for g in user_groups)
+        )
 
 
 async def is_user_feature_admin(

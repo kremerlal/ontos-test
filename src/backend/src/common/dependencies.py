@@ -65,7 +65,12 @@ logger = get_logger(__name__)
 
 
 class _NoOpDbSession:
-    """Placeholder session for uc_native mode when Postgres is not configured."""
+    """Placeholder session for uc_native mode when Postgres is not configured.
+
+    Mimics enough of the SQLAlchemy Session / Query chain that read-only
+    repository helpers (e.g. certification_levels.order_by().all()) return
+    empty results instead of AttributeError 500s.
+    """
 
     def commit(self) -> None:
         return None
@@ -79,23 +84,74 @@ class _NoOpDbSession:
     def add(self, *_args, **_kwargs) -> None:
         return None
 
+    def delete(self, *_args, **_kwargs) -> None:
+        return None
+
     def flush(self) -> None:
         return None
 
     def refresh(self, *_args, **_kwargs) -> None:
         return None
 
+    def execute(self, *_args, **_kwargs):
+        return self
+
+    def scalar(self, *_args, **_kwargs):
+        return None
+
+    def scalars(self, *_args, **_kwargs):
+        return self
+
     def query(self, *_args, **_kwargs):
+        return self
+
+    def options(self, *_args, **_kwargs):
+        return self
+
+    def join(self, *_args, **_kwargs):
+        return self
+
+    def outerjoin(self, *_args, **_kwargs):
         return self
 
     def filter(self, *_args, **_kwargs):
         return self
 
+    def filter_by(self, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def group_by(self, *_args, **_kwargs):
+        return self
+
+    def distinct(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def offset(self, *_args, **_kwargs):
+        return self
+
+    def first(self):
+        return None
+
     def one_or_none(self):
         return None
 
+    def one(self):
+        raise LookupError("No row found for _NoOpDbSession.one()")
+
     def all(self):
         return []
+
+    def count(self):
+        return 0
+
+    def __iter__(self):
+        return iter([])
 
 
 # --- Core Dependency Functions --- #
@@ -103,10 +159,10 @@ class _NoOpDbSession:
 # Database Session Dependency Provider (Function)
 def get_db(request: Request):
     from src.common.config import get_settings as load_settings
-    from src.common.storage_mode import StorageMode, resolve_storage_mode
+    from src.common.storage_mode import requires_oltp_database, resolve_storage_mode
 
     settings = getattr(request.app.state, "settings", None) or load_settings()
-    if resolve_storage_mode(settings) == StorageMode.UC_NATIVE:
+    if not requires_oltp_database(resolve_storage_mode(settings)):
         yield _NoOpDbSession()
         return
 

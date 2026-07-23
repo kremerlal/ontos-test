@@ -148,13 +148,22 @@ class ConnectionsManager:
         connector_type = db_obj.connector_type
         config_dict = dict(db_obj.config or {})
 
-        # Pre-registered singleton instances (e.g. Databricks) — return directly.
+        # Databricks / UC: always construct from workspace client when available.
+        if connector_type == "databricks":
+            from src.connectors.databricks import DatabricksConnector
+
+            if self._ws_client is not None:
+                return DatabricksConnector(workspace_client=self._ws_client)
+            if connector_type in registry._connector_instances:
+                return registry._connector_instances[connector_type]
+            raise ValueError(
+                "Databricks connector requires a workspace client; none is configured"
+            )
+
+        # Pre-registered singleton instances (e.g. custom connectors) — return directly.
         # Only match explicitly registered instances, not class-created cached ones.
         if connector_type in registry._connector_instances and \
            connector_type not in registry._connector_classes:
-            if self._ws_client and connector_type == "databricks":
-                from src.connectors.databricks import DatabricksConnector
-                return DatabricksConnector(workspace_client=self._ws_client)
             return registry._connector_instances[connector_type]
 
         # Inject workspace client for connectors that need it
@@ -168,6 +177,9 @@ class ConnectionsManager:
         if connector_type in registry._connector_classes:
             connector_class = registry._connector_classes[connector_type]
             return connector_class(typed_config)
+
+        if registry.has_connector(connector_type):
+            return registry.get_connector(connector_type)
 
         raise ValueError(f"No connector class registered for type '{connector_type}'")
 

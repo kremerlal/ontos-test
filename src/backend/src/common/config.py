@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     # Databricks connection settings
     DATABRICKS_HOST: str
     DATABRICKS_WAREHOUSE_ID: str
-    DATABRICKS_CATALOG: str = Field("app_ontos", env='DATABRICKS_CATALOG')  # Default Unity Catalog
-    DATABRICKS_SCHEMA: str = Field("app_ontos", env='DATABRICKS_SCHEMA')  # Default schema
+    DATABRICKS_CATALOG: str = Field("classic_stable_kremer_catalog", env='DATABRICKS_CATALOG')  # Default Unity Catalog
+    DATABRICKS_SCHEMA: str = Field("ontos_test", env='DATABRICKS_SCHEMA')  # Default schema
     DATABRICKS_VOLUME: Optional[str] = Field(None, env='DATABRICKS_VOLUME')  # Full volume path (injected by Databricks Apps)
     DATABRICKS_TOKEN: Optional[str] = None  # Optional since handled by SDK
     DATABRICKS_CONFIG_PROFILE: Optional[str] = Field(
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     DEBUG: bool = Field(False, env='DEBUG')
     LOG_LEVEL: str = Field('INFO', env='LOG_LEVEL')
     LOG_FILE: Optional[str] = Field(None, env='LOG_FILE')
-    APP_ADMIN_DEFAULT_GROUPS: Optional[str] = Field('["admins"]', env='APP_ADMIN_DEFAULT_GROUPS') # JSON list as string
+    APP_ADMIN_DEFAULT_GROUPS: Optional[str] = Field('["admins", "users"]', env='APP_ADMIN_DEFAULT_GROUPS') # JSON list as string
 
     # Audit Log settings
     APP_AUDIT_LOG_DIR: str = Field(..., env='APP_AUDIT_LOG_DIR')

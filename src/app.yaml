@@ -12,7 +12,7 @@ env:
   - name: "APP_UC_MIRROR_ENABLED"
     value: "false"
   - name: "APP_UC_APP_SCHEMA"
-    value: "app_ontos"
+    value: "ontos_test"
 
   - name: "PYTHONPATH"
     value: "./backend:${PYTHONPATH}"

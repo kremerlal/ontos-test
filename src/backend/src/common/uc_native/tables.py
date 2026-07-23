@@ -64,6 +64,16 @@ ENTITY_TABLES: Dict[str, List[ColumnSpec]] = {
         ("updated_at", ColumnTypeName.STRING),
         ("snapshot_json", ColumnTypeName.STRING),
     ],
+    "connections": [
+        ("id", ColumnTypeName.STRING),
+        ("name", ColumnTypeName.STRING),
+        ("connector_type", ColumnTypeName.STRING),
+        ("enabled", ColumnTypeName.BOOLEAN),
+        ("is_default", ColumnTypeName.BOOLEAN),
+        ("updated_at", ColumnTypeName.STRING),
+        ("etag", ColumnTypeName.STRING),
+        ("snapshot_json", ColumnTypeName.STRING),
+    ],
     "entity_tag_associations": [
         ("id", ColumnTypeName.STRING),
         ("tag_id", ColumnTypeName.STRING),

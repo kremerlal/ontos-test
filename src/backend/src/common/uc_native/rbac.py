@@ -86,8 +86,9 @@ class UcNativeRbacStore:
         return _role_row_to_model(rows[0]) if rows else None
 
     def seed_default_roles(self) -> int:
-        existing = self._store.list_rows("app_roles", limit=1)
+        existing = self._store.list_rows("app_roles", limit=200)
         if existing:
+            self._reconcile_admin_groups(existing)
             logger.info("UC native roles already seeded (%s rows)", len(existing))
             return 0
 
@@ -105,9 +106,10 @@ class UcNativeRbacStore:
             if not name:
                 continue
             is_admin = name == "Admin"
-            groups = role_def.get("assigned_groups") or []
-            if is_admin and not groups:
-                groups = admin_groups
+            groups = list(role_def.get("assigned_groups") or [])
+            if is_admin:
+                # Always merge APP_ADMIN_DEFAULT_GROUPS so Admin stays reachable.
+                groups = list(dict.fromkeys([*groups, *admin_groups]))
             perms: Dict[str, FeatureAccessLevel]
             if is_admin:
                 perms = _admin_permissions()
@@ -135,12 +137,45 @@ class UcNativeRbacStore:
         logger.info("Seeded %s UC native roles", count)
         return count
 
+    def _reconcile_admin_groups(self, roles: List[Dict[str, Any]]) -> None:
+        """Ensure existing Admin roles include every configured admin group."""
+        configured = self._admin_groups()
+        for role in roles:
+            name = str(role.get("name") or "")
+            is_admin_flag = role.get("is_admin_role")
+            is_admin = name == "Admin" or str(is_admin_flag).lower() in ("true", "1", "yes")
+            if not is_admin:
+                continue
+            try:
+                existing = json.loads(role.get("assigned_groups_json") or "[]")
+                if not isinstance(existing, list):
+                    existing = []
+            except json.JSONDecodeError:
+                existing = []
+            groups = list(dict.fromkeys([*[str(g) for g in existing], *configured]))
+            if groups == existing:
+                continue
+            updated = dict(role)
+            updated["assigned_groups_json"] = json.dumps(groups)
+            # Keep Admin permissions full in case an earlier seed wrote {}.
+            perms_raw = role.get("feature_permissions_json") or "{}"
+            try:
+                perms_obj = json.loads(perms_raw)
+            except json.JSONDecodeError:
+                perms_obj = {}
+            if not perms_obj:
+                updated["feature_permissions_json"] = json.dumps(
+                    {k: v.value for k, v in _admin_permissions().items()}
+                )
+            self._store.merge_row("app_roles", updated)
+            logger.info("Updated UC native Admin groups: %s", groups)
+
     def _admin_groups(self) -> List[str]:
-        raw = self._settings.APP_ADMIN_DEFAULT_GROUPS or '["admins"]'
+        raw = self._settings.APP_ADMIN_DEFAULT_GROUPS or '["admins", "users"]'
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
                 return [str(g) for g in parsed]
         except json.JSONDecodeError:
             pass
-        return ["admins"]
+        return ["admins", "users"]

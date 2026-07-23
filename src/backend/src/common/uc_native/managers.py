@@ -14,6 +14,10 @@ from src.models.data_domains import DataDomainCreate, DataDomainRead, DataDomain
 from src.models.data_products import DataProduct, DataProductStatus
 from src.models.assets import AssetRead, PaginatedAssetSummary
 from src.models.tags import Tag, TagCreate, TagNamespace, TagNamespaceCreate
+from src.models.connections import ConnectionCreate, ConnectionUpdate, ConnectionResponse
+from src.controller.connections_manager import SYSTEM_CREATED_BY
+from src.connectors.registry import get_registry
+from src.connectors.base import AssetConnector, ConnectorConfig
 
 logger = get_logger(__name__)
 
@@ -121,6 +125,39 @@ class UcNativeDataProductsManager:
             return False
         self._entities.delete_entity("data_products", product_id)
         return True
+
+    def get_published_products(
+        self, skip: int = 0, limit: int = 100, scope: Optional[str] = None
+    ) -> List[DataProduct]:
+        """Marketplace listing: products with a non-none publication_scope."""
+        products = self.list_products(skip=0, limit=skip + limit, is_admin=True)
+        published = [
+            p
+            for p in products
+            if p.publication_scope and str(p.publication_scope).lower() != "none"
+        ]
+        if scope:
+            published = [
+                p
+                for p in published
+                if p.publication_scope
+                and str(p.publication_scope).lower() == scope.lower()
+            ]
+        return published[skip : skip + limit]
+
+    def get_user_subscriptions(
+        self,
+        subscriber_email: str,
+        skip: int = 0,
+        limit: int = 100,
+        db=None,
+    ) -> List[DataProduct]:
+        """Subscriptions are not yet persisted in UC-native Delta overlays."""
+        logger.debug(
+            "UC-native get_user_subscriptions(%s) — returning empty until overlay support",
+            subscriber_email,
+        )
+        return []
 
     def get_statuses(self) -> List[str]:
         return [s.value for s in DataProductStatus]
@@ -468,3 +505,250 @@ class UcNativeTagsManager:
             namespace_in=TagNamespaceCreate(name="default", description="Default namespace"),
             user_email=user_email,
         )
+
+
+class UcNativeConnectionsManager:
+    """Connections SoR on UC Delta (replaces Postgres connections table)."""
+
+    _INTERNAL_FIELDS = {"workspace_client", "credentials"}
+
+    def __init__(self, entities: UcNativeEntityStore, workspace_client: Optional[Any] = None) -> None:
+        self._entities = entities
+        self._ws_client = workspace_client
+
+    def _parse_dt(self, value: Any) -> datetime:
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str) and value:
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        return _now()
+
+    def _to_response(self, doc: Dict[str, Any]) -> ConnectionResponse:
+        return ConnectionResponse(
+            id=UUID(str(doc["id"])),
+            name=doc.get("name") or "Unnamed",
+            connector_type=doc.get("connector_type") or "databricks",
+            description=doc.get("description"),
+            config=doc.get("config") or {},
+            enabled=bool(doc.get("enabled", True)),
+            is_default=bool(doc.get("is_default", False)),
+            system_asset_id=UUID(str(doc["system_asset_id"])) if doc.get("system_asset_id") else None,
+            created_at=self._parse_dt(doc.get("created_at")),
+            updated_at=self._parse_dt(doc.get("updated_at")),
+            created_by=doc.get("created_by"),
+        )
+
+    def list_connections(self, connector_type: Optional[str] = None) -> List[ConnectionResponse]:
+        docs = self._entities.list_entities("connections", limit=500)
+        if connector_type:
+            docs = [d for d in docs if d.get("connector_type") == connector_type]
+        docs.sort(key=lambda d: (d.get("connector_type") or "", d.get("name") or ""))
+        return [self._to_response(d) for d in docs]
+
+    def get_connection(self, connection_id: UUID) -> Optional[ConnectionResponse]:
+        doc = self._entities.get_entity("connections", str(connection_id))
+        return self._to_response(doc) if doc else None
+
+    def _clear_default_for_type(self, connector_type: str) -> None:
+        for doc in self._entities.list_entities("connections", limit=500):
+            if doc.get("connector_type") == connector_type and doc.get("is_default"):
+                doc["is_default"] = False
+                doc["updated_at"] = _now().isoformat()
+                self._entities.save_entity(
+                    "connections",
+                    doc,
+                    index_fields={
+                        "name": doc.get("name"),
+                        "connector_type": doc.get("connector_type"),
+                        "enabled": doc.get("enabled", True),
+                        "is_default": False,
+                        "updated_at": doc["updated_at"],
+                    },
+                )
+
+    def create_connection(
+        self, data: ConnectionCreate, created_by: Optional[str] = None
+    ) -> ConnectionResponse:
+        if data.is_default:
+            self._clear_default_for_type(data.connector_type)
+        now = _now().isoformat()
+        clean_config = {k: v for k, v in (data.config or {}).items() if k not in self._INTERNAL_FIELDS}
+        payload = {
+            "id": str(uuid.uuid4()),
+            "name": data.name,
+            "connector_type": data.connector_type,
+            "description": data.description,
+            "config": clean_config,
+            "enabled": data.enabled,
+            "is_default": data.is_default,
+            "system_asset_id": str(data.system_asset_id) if data.system_asset_id else None,
+            "created_by": created_by or "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        saved = self._entities.save_entity(
+            "connections",
+            payload,
+            index_fields={
+                "name": payload["name"],
+                "connector_type": payload["connector_type"],
+                "enabled": payload["enabled"],
+                "is_default": payload["is_default"],
+                "updated_at": now,
+            },
+        )
+        return self._to_response(saved)
+
+    def update_connection(
+        self, connection_id: UUID, data: ConnectionUpdate
+    ) -> Optional[ConnectionResponse]:
+        existing = self._entities.get_entity("connections", str(connection_id))
+        if not existing:
+            return None
+        if existing.get("created_by") == SYSTEM_CREATED_BY:
+            # Allow limited updates? Postgres manager allows name/config updates for system
+            # except delete. Mirror update_connection from ConnectionsManager.
+            pass
+        updates = data.model_dump(exclude_unset=True)
+        if "config" in updates and updates["config"] is not None:
+            updates["config"] = {
+                k: v for k, v in updates["config"].items() if k not in self._INTERNAL_FIELDS
+            }
+        if updates.get("is_default"):
+            self._clear_default_for_type(existing.get("connector_type") or "")
+        if updates.get("system_asset_id") is not None:
+            updates["system_asset_id"] = str(updates["system_asset_id"])
+        existing.update(updates)
+        existing["updated_at"] = _now().isoformat()
+        saved = self._entities.save_entity(
+            "connections",
+            existing,
+            index_fields={
+                "name": existing.get("name"),
+                "connector_type": existing.get("connector_type"),
+                "enabled": existing.get("enabled", True),
+                "is_default": existing.get("is_default", False),
+                "updated_at": existing["updated_at"],
+            },
+        )
+        return self._to_response(saved)
+
+    def delete_connection(self, connection_id: UUID) -> bool:
+        existing = self._entities.get_entity("connections", str(connection_id))
+        if not existing:
+            return False
+        if existing.get("created_by") == SYSTEM_CREATED_BY:
+            raise ValueError("System connections cannot be deleted")
+        self._entities.delete_entity("connections", str(connection_id))
+        return True
+
+    def get_connector_for_connection(self, connection_id: UUID) -> Optional[AssetConnector]:
+        doc = self._entities.get_entity("connections", str(connection_id))
+        if not doc:
+            return None
+        return self._build_connector(doc)
+
+    def _build_connector(self, doc: Dict[str, Any]) -> AssetConnector:
+        registry = get_registry()
+        connector_type = doc.get("connector_type") or "databricks"
+        config_dict = dict(doc.get("config") or {})
+
+        # Databricks / UC is always constructed from the workspace client.
+        # Do not depend on registry class registration (Lakebase startup
+        # registers an instance, not a class).
+        if connector_type == "databricks":
+            from src.connectors.databricks import DatabricksConnector
+
+            ws = self._ws_client
+            if ws is None and registry.has_connector("databricks"):
+                try:
+                    existing = registry.get_connector("databricks")
+                    if getattr(existing, "_client", None) is not None:
+                        return existing
+                except Exception:
+                    pass
+            if ws is None:
+                raise ValueError(
+                    "Databricks connector requires a workspace client; none is configured"
+                )
+            return DatabricksConnector(workspace_client=ws)
+
+        if connector_type in registry._connector_instances and connector_type not in registry._connector_classes:
+            return registry._connector_instances[connector_type]
+
+        if connector_type == "bigquery" and self._ws_client:
+            config_dict["workspace_client"] = self._ws_client
+
+        from src.controller.connections_manager import _get_config_classes
+
+        config_classes = _get_config_classes()
+        config_cls = config_classes.get(connector_type, ConnectorConfig)
+        typed_config = config_cls(**config_dict)
+
+        if connector_type in registry._connector_classes:
+            connector_class = registry._connector_classes[connector_type]
+            return connector_class(typed_config)
+
+        if registry.has_connector(connector_type):
+            return registry.get_connector(connector_type)
+
+        raise ValueError(f"No connector class registered for type '{connector_type}'")
+
+    def test_connection(self, connection_id: UUID) -> Dict[str, Any]:
+        doc = self._entities.get_entity("connections", str(connection_id))
+        if not doc:
+            return {"healthy": False, "error": "Connection not found"}
+        try:
+            connector = self._build_connector(doc)
+            result = connector.health_check()
+            result["connection_name"] = doc.get("name")
+            return result
+        except Exception as exc:
+            logger.error("Error testing connection '%s': %s", doc.get("name"), exc, exc_info=True)
+            return {
+                "connector_type": doc.get("connector_type"),
+                "connection_name": doc.get("name"),
+                "healthy": False,
+                "error": str(exc),
+            }
+
+    def list_connector_types(self) -> List[Dict[str, Any]]:
+        # Reuse Postgres manager's type listing (registry-only, no DB).
+        from src.controller.connections_manager import ConnectionsManager
+
+        return ConnectionsManager(db=None, workspace_client=self._ws_client).list_connector_types()
+
+    def ensure_system_databricks_connection(self) -> None:
+        docs = self._entities.list_entities("connections", limit=500)
+        if any(d.get("name") == "Databricks UC" for d in docs):
+            logger.debug("System Databricks UC connection already exists")
+            return
+        now = _now().isoformat()
+        payload = {
+            "id": str(uuid.uuid4()),
+            "name": "Databricks UC",
+            "connector_type": "databricks",
+            "description": "Default Unity Catalog connection (auto-configured from environment)",
+            "config": {},
+            "enabled": True,
+            "is_default": True,
+            "system_asset_id": None,
+            "created_by": SYSTEM_CREATED_BY,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._entities.save_entity(
+            "connections",
+            payload,
+            index_fields={
+                "name": payload["name"],
+                "connector_type": "databricks",
+                "enabled": True,
+                "is_default": True,
+                "updated_at": now,
+            },
+        )
+        logger.info("Created system Databricks UC connection (UC-native)")
