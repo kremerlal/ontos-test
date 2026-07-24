@@ -1,5 +1,9 @@
 command: ['python', 'backend/src/app.py']
 
+# Alternate profile: external Postgres OLTP (not Lakebase OAuth, not UC Delta SoR).
+# Prefer src/app.yaml (STORAGE_MODE=uc_native) for no-Lakebase Databricks Apps.
+# See docs/handbook/deploying-without-lakebase.md.
+
 env:
   - name: "ENV"
     value: "PROD"

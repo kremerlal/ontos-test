@@ -60,6 +60,16 @@ seeds RBAC roles from `data/settings.yaml` plus admin group membership from
 `APP_ADMIN_DEFAULT_GROUPS`. This fixes the home-page "no role assigned" banner
 when no Postgres is attached.
 
+Set `APP_DEMO_MODE=true` to also seed a small demo domain/team/tag via
+`src/backend/src/common/uc_native/demo_seed.py` (`demo_seed_delta` capability).
+
+### Databricks Jobs (tag sync, DQ, MDM, …)
+
+Job YAMLs under `src/backend/src/workflows/*/` now accept `storage_mode=uc_native`
+and treat `lakebase_instance_name` as optional. Entrypoints soft-skip Postgres
+OLTP writers when Lakebase is absent — migrate those writers to UC Delta before
+re-enabling schedules in production UC-native deploys.
+
 ### Profile: `postgres` (legacy alternative)
 
 Use [`src/app-no-lakebase.yaml`](../src/app-no-lakebase.yaml) when you prefer

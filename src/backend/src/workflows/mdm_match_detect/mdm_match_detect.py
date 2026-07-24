@@ -586,15 +586,33 @@ def main():
     parser.add_argument("--run_id", required=True, help="Match run ID")
     parser.add_argument("--config_id", required=True, help="MDM configuration ID")
     parser.add_argument("--source_link_id", default="", help="Specific source link to process")
-    parser.add_argument("--lakebase_instance_name", required=True, help="Lakebase instance name for OAuth")
-    parser.add_argument("--postgres_host", required=True, help="PostgreSQL host")
-    parser.add_argument("--postgres_db", required=True, help="PostgreSQL database")
+    parser.add_argument("--lakebase_instance_name", default="", help="Lakebase instance name for OAuth (omit for uc_native)")
+    parser.add_argument("--storage_mode", type=str, default="")
+    parser.add_argument("--postgres_host", default="", help="PostgreSQL host")
+    parser.add_argument("--postgres_db", default="", help="PostgreSQL database")
     parser.add_argument("--postgres_port", default="5432", help="PostgreSQL port")
     parser.add_argument("--postgres_schema", default="public", help="PostgreSQL schema")
     # Telemetry parameters (passed from app)
     parser.add_argument("--product_name", type=str, default="ontos")
     parser.add_argument("--product_version", type=str, default="0.0.0")
     args, _ = parser.parse_known_args()
+    try:
+        from workflows.common.uc_native_runtime import (
+            lakebase_skip_message,
+            should_use_lakebase_oltp,
+        )
+    except ImportError:
+        from src.workflows.common.uc_native_runtime import (  # type: ignore
+            lakebase_skip_message,
+            should_use_lakebase_oltp,
+        )
+    if not should_use_lakebase_oltp(
+        storage_mode=getattr(args, "storage_mode", None),
+        lakebase_instance_name=getattr(args, "lakebase_instance_name", None),
+    ):
+        print(lakebase_skip_message('mdm_match_detect'))
+        return
+
 
     print("=" * 80)
     print("MDM Match Detection Workflow")

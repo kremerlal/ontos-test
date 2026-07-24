@@ -1,3 +1,5 @@
+# UC-native note: set storage_mode=uc_native and leave lakebase_instance_name empty.
+# Job entrypoints soft-skip Postgres writers until migrated to Delta stores.
 name: "Unity Catalog Tag Sync"
 description: "Sync Ontos metadata to UC governed tags"
 format: "MULTI_TASK"
@@ -29,6 +31,8 @@ tasks:
         - "{{job.parameters.verbose}}"
         - "--lakebase_instance_name"
         - "{{job.parameters.lakebase_instance_name}}"
+        - "--storage_mode"
+        - "{{job.parameters.storage_mode}}"
         - "--postgres_host"
         - "{{job.parameters.postgres_host}}"
         - "--postgres_db"
@@ -58,6 +62,8 @@ parameters:
   limit: ""
   verbose: "false"
   lakebase_instance_name: ""
+  # Empty/omit for STORAGE_MODE=uc_native (Delta SoR; no Lakebase OLTP).
+  storage_mode: "uc_native"
   postgres_host: ""
   postgres_db: ""
   postgres_port: "5432"
