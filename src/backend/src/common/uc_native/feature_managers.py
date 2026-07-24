@@ -13,6 +13,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.common.uc_native.entities import UcNativeEntityStore
 from src.common.uc_native.overlays import UcNativeOverlayStore
 from src.common.uc_native.workflows import UcNativeWorkflowStore
+from src.common.errors import ConflictError, NotFoundError
+from src.models.entity_subscriptions import (
+    EntitySubscriptionRead,
+    EntitySubscriptionSummary,
+)
 
 
 def _now() -> str:
@@ -390,19 +395,43 @@ class UcNativeEntitySubscriptionsManager:
 
     def subscribe(self, db=None, sub_in=None, **kwargs):
         doc = _data(sub_in or kwargs)
+        existing = self.get_user_subscriptions(
+            db=db, subscriber_email=doc.get("subscriber_email")
+        )
+        if any(
+            item.entity_type == doc.get("entity_type")
+            and item.entity_id == str(doc.get("entity_id"))
+            for item in existing
+        ):
+            raise ConflictError("Already subscribed to this entity")
         doc.setdefault("id", str(uuid.uuid4()))
-        return self._overlays.subscribe(doc)
+        doc.setdefault("created_at", _now())
+        return EntitySubscriptionRead.model_validate(self._overlays.subscribe(doc))
 
     def unsubscribe(self, db=None, subscription_id=None, **_):
-        return self._overlays.unsubscribe(str(subscription_id))
+        if not self._overlays.unsubscribe(str(subscription_id)):
+            raise NotFoundError(f"Subscription not found: {subscription_id}")
 
     def get_subscribers(self, db=None, entity_type=None, entity_id=None, **_):
-        return self._overlays.list_for_entity("entity_subscriptions", entity_type, str(entity_id))
+        subscribers = [
+            EntitySubscriptionRead.model_validate(item)
+            for item in self._overlays.list_for_entity(
+                "entity_subscriptions", entity_type, str(entity_id)
+            )
+        ]
+        return EntitySubscriptionSummary(
+            entity_type=entity_type,
+            entity_id=str(entity_id),
+            subscribers=subscribers,
+            total=len(subscribers),
+        )
 
     def get_user_subscriptions(self, db=None, subscriber_email=None, **_):
         rows = self._overlays._store.list_rows("entity_subscriptions", limit=1000)
         return [
-            {**self._overlays._store.parse_snapshot(row), "id": row.get("id")}
+            EntitySubscriptionRead.model_validate(
+                {**self._overlays._store.parse_snapshot(row), "id": row.get("id")}
+            )
             for row in rows
             if row.get("subscriber_email") == subscriber_email
         ]

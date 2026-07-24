@@ -35,11 +35,16 @@ class UcNativeOverlayStore:
 
     def list_comments(self, entity_type: str, entity_id: str) -> List[Dict[str, Any]]:
         fqn = self._store.table_fqn("comments")
+        safe_type = entity_type.replace("'", "''")
+        safe_id = entity_id.replace("'", "''")
         rows = self._store.query(
-            f"SELECT * FROM {fqn} WHERE entity_type = '{entity_type}' "
-            f"AND entity_id = '{entity_id}' ORDER BY updated_at DESC LIMIT 200"
+            f"SELECT * FROM {fqn} WHERE entity_type = '{safe_type}' "
+            f"AND entity_id = '{safe_id}' ORDER BY updated_at DESC LIMIT 200"
         )
-        return rows
+        return [
+            {**row, **self._store.parse_snapshot(row), "id": row.get("id")}
+            for row in rows
+        ]
 
     def add_relationship(
         self,
@@ -107,6 +112,23 @@ class UcNativeOverlayStore:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "details_json": json.dumps(details or {}),
             },
+        )
+
+    def list_change_log(
+        self,
+        entity_type: str,
+        entity_id: str,
+        *,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Return change-log rows for an entity, newest first."""
+        fqn = self._store.table_fqn("entity_change_log")
+        safe_type = entity_type.replace("'", "''")
+        safe_id = entity_id.replace("'", "''")
+        safe_limit = max(1, min(int(limit), 1000))
+        return self._store.query(
+            f"SELECT * FROM {fqn} WHERE entity_type = '{safe_type}' "
+            f"AND entity_id = '{safe_id}' ORDER BY timestamp DESC LIMIT {safe_limit}"
         )
 
     def create_notification(
