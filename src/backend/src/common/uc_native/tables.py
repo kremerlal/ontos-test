@@ -92,6 +92,16 @@ ENTITY_TABLES: Dict[str, List[ColumnSpec]] = {
         ("assigned_value", ColumnTypeName.STRING),
         ("updated_at", ColumnTypeName.STRING),
     ],
+    "teams": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "projects": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "business_roles": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "business_owners": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "delivery_methods": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "data_asset_reviews": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "mdm_configs": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "compliance_policies": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "llm_sessions": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "mcp_tokens": [("id", ColumnTypeName.STRING), ("name", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("etag", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
 }
 
 OVERLAY_TABLES: Dict[str, List[ColumnSpec]] = {
@@ -141,6 +151,14 @@ OVERLAY_TABLES: Dict[str, List[ColumnSpec]] = {
         ("success", ColumnTypeName.BOOLEAN),
         ("details_json", ColumnTypeName.STRING),
     ],
+    "entity_semantic_links": [("id", ColumnTypeName.STRING), ("entity_type", ColumnTypeName.STRING), ("entity_id", ColumnTypeName.STRING), ("iri", ColumnTypeName.STRING), ("link_type", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "entity_subscriptions": [("id", ColumnTypeName.STRING), ("entity_type", ColumnTypeName.STRING), ("entity_id", ColumnTypeName.STRING), ("subscriber_email", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "cost_items": [("id", ColumnTypeName.STRING), ("entity_type", ColumnTypeName.STRING), ("entity_id", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "quality_items": [("id", ColumnTypeName.STRING), ("entity_type", ColumnTypeName.STRING), ("entity_id", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "metadata_items": [("id", ColumnTypeName.STRING), ("entity_type", ColumnTypeName.STRING), ("entity_id", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "ontology_generation_runs": [("id", ColumnTypeName.STRING), ("user_id", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "term_mapping_runs": [("id", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("created_by", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
+    "term_mapping_suggestions": [("id", ColumnTypeName.STRING), ("run_id", ColumnTypeName.STRING), ("status", ColumnTypeName.STRING), ("updated_at", ColumnTypeName.STRING), ("snapshot_json", ColumnTypeName.STRING)],
 }
 
 WORKFLOW_TABLES: Dict[str, List[ColumnSpec]] = {

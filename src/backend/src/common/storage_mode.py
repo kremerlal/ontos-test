@@ -58,7 +58,7 @@ UC_READONLY_CAPABILITIES: List[str] = [
     "audit_volume",
 ]
 
-# Full app on UC Delta (no Postgres).
+# UC-native managers persist these features in Delta tables; no Postgres is used.
 UC_NATIVE_CAPABILITIES: List[str] = [
     *UC_CAPABILITIES,
     "crud_entities",
@@ -68,6 +68,8 @@ UC_NATIVE_CAPABILITIES: List[str] = [
     "access_grants",
     "agreements",
     "mdm",
+    "term_mapping",
+    "ontology_generator",
     "settings_admin",
     "demo_seed_delta",
     "uc_native_sor",

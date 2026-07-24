@@ -206,6 +206,10 @@ def get_jobs_manager(request: Request) -> JobsManager:
 
     JobsManager is owned by SettingsManager, so we access it via settings_manager._jobs
     """
+    jobs_manager = getattr(request.app.state, 'jobs_manager', None)
+    if jobs_manager:
+        return jobs_manager
+
     settings_manager = getattr(request.app.state, 'settings_manager', None)
     if not settings_manager:
         logger.critical("SettingsManager not found in application state during request!")

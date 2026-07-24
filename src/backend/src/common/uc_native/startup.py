@@ -12,6 +12,7 @@ from src.controller.audit_manager import AuditManager
 from src.controller.directory_manager import DirectoryManager
 from src.controller.search_manager import SearchManager
 from src.controller.users_manager import UsersManager
+from src.controller.workspace_manager import WorkspaceManager
 from src.common.uc_native.bootstrap import bootstrap_uc_native
 from src.common.uc_native.entities import UcNativeEntityStore
 from src.common.uc_native.managers import (
@@ -33,6 +34,24 @@ from src.common.uc_native.overlay_managers import (
     UcNativeNotificationsManager,
 )
 from src.common.uc_native.semantic_manager import UcNativeSemanticModelsManager
+from src.common.uc_native.feature_managers import (
+    UcNativeAccessGrantsManager,
+    UcNativeBusinessOwnersManager,
+    UcNativeBusinessRolesManager,
+    UcNativeComplianceManager,
+    UcNativeCostsManager,
+    UcNativeDataAssetReviewManager,
+    UcNativeDeliveryMethodsManager,
+    UcNativeEntitySubscriptionsManager,
+    UcNativeMdmManager,
+    UcNativeMetadataManager,
+    UcNativeProjectsManager,
+    UcNativeQualityManager,
+    UcNativeSemanticLinksManager,
+    UcNativeTeamsManager,
+    UcNativeTermMappingManager,
+    UcNativeWorkflowsManager,
+)
 
 logger = get_logger(__name__)
 
@@ -107,6 +126,7 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
     app.state.users_manager = UsersManager(ws_client=ws_client)
     app.state.audit_manager = AuditManager(settings=settings, db_session=None)
     app.state.directory_manager = DirectoryManager()
+    app.state.workspace_manager = WorkspaceManager(ws_client=ws_client)
 
     app.state.data_products_manager = UcNativeDataProductsManager(entities)
     app.state.data_contracts_manager = UcNativeDataContractsManager(entities)
@@ -134,13 +154,35 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
         overlays, settings_manager
     )
     settings_manager.set_notifications_manager(app.state.notifications_manager)
-    app.state.search_manager = SearchManager(searchable_managers=[])
+    app.state.search_manager = SearchManager(searchable_managers=[
+        app.state.data_products_manager,
+        app.state.data_contracts_manager,
+        app.state.assets_manager,
+        app.state.data_domain_manager,
+        app.state.tags_manager,
+    ])
+    app.state.semantic_links_manager = UcNativeSemanticLinksManager(overlays)
+    app.state.entity_subscriptions_manager = UcNativeEntitySubscriptionsManager(overlays)
+    app.state.costs_manager = UcNativeCostsManager(overlays)
+    app.state.quality_manager = UcNativeQualityManager(overlays)
+    app.state.metadata_manager = UcNativeMetadataManager(overlays)
+    app.state.teams_manager = UcNativeTeamsManager(entities)
+    app.state.projects_manager = UcNativeProjectsManager(entities)
+    app.state.business_roles_manager = UcNativeBusinessRolesManager(entities)
+    app.state.business_owners_manager = UcNativeBusinessOwnersManager(entities)
+    app.state.delivery_methods_manager = UcNativeDeliveryMethodsManager(entities)
+    app.state.data_asset_review_manager = UcNativeDataAssetReviewManager(entities)
+    app.state.compliance_manager = UcNativeComplianceManager(entities)
+    app.state.mdm_manager = UcNativeMdmManager(entities)
 
     # Optional / secondary stores — soft-fail so RBAC still works.
     try:
         workflows = UcNativeWorkflowStore(store, ws_client, settings)
         app.state.uc_native_workflows = workflows
         app.state.jobs_manager = UcNativeJobsManager(workflows, ws_client, settings)
+        settings_manager._jobs = app.state.jobs_manager
+        app.state.access_grants_manager = UcNativeAccessGrantsManager(workflows)
+        app.state.workflows_manager = UcNativeWorkflowsManager(workflows)
     except Exception as exc:
         health.setdefault("warnings", []).append(f"UC workflow store unavailable: {exc}")
         logger.warning("UC native workflow store failed: %s", exc, exc_info=True)
@@ -169,17 +211,13 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
             health.setdefault("warnings", []).append(f"OntologySchemaManager unavailable: {exc}")
             logger.warning("UC native OntologySchemaManager failed: %s", exc, exc_info=True)
 
-        # Term Mapping — list endpoints work with NoOp DB (empty); create needs Lakebase
-        # or future UC tables, but wiring the manager avoids 503 / confusing 500s.
+        # Term mapping runs and suggestions are persisted in UC Delta.
         try:
-            from src.controller.term_mapping_manager import TermMappingManager
-
-            app.state.term_mapping_manager = TermMappingManager(
-                semantic_models_manager=semantic_manager,
-                reviews_manager=None,
-                notifications_manager=app.state.notifications_manager,
+            app.state.term_mapping_manager = UcNativeTermMappingManager(
+                entities,
+                semantic_links=app.state.semantic_links_manager,
             )
-            logger.info("TermMappingManager initialized for UC-native")
+            logger.info("UC-native TermMappingManager initialized")
         except Exception as exc:
             health.setdefault("warnings", []).append(f"TermMappingManager unavailable: {exc}")
             logger.warning("UC native TermMappingManager failed: %s", exc, exc_info=True)

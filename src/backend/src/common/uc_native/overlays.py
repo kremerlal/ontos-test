@@ -138,3 +138,72 @@ class UcNativeOverlayStore:
             f"SELECT * FROM {fqn} WHERE username = '{safe_user}' "
             f"ORDER BY created_at DESC LIMIT {int(limit)}"
         )
+
+    def add(self, table_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist one generic overlay document with searchable index columns."""
+        row = dict(payload)
+        row.setdefault("id", str(uuid.uuid4()))
+        row.setdefault("updated_at", __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())
+        snapshot = dict(row)
+        snapshot.pop("snapshot_json", None)
+        row["snapshot_json"] = json.dumps(snapshot, default=str)
+        self._store.merge_row(table_name, row)
+        return snapshot
+
+    def get(self, table_name: str, item_id: str) -> Optional[Dict[str, Any]]:
+        row = self._store.get_by_id(table_name, item_id)
+        if not row:
+            return None
+        return {**self._store.parse_snapshot(row), "id": row.get("id", item_id)}
+
+    def remove(self, table_name: str, item_id: str) -> bool:
+        if not self._store.get_by_id(table_name, item_id):
+            return False
+        self._store.delete_by_id(table_name, item_id)
+        return True
+
+    def list_for_entity(self, table_name: str, entity_type: str, entity_id: str) -> List[Dict[str, Any]]:
+        rows = self._store.list_rows(table_name, limit=1000)
+        return [
+            {**self._store.parse_snapshot(row), "id": row.get("id")}
+            for row in rows
+            if row.get("entity_type") == entity_type and row.get("entity_id") == entity_id
+        ]
+
+    def add_semantic_link(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.add("entity_semantic_links", payload)
+
+    def list_semantic_links(self, *, entity_id: Optional[str] = None, entity_type: Optional[str] = None, iri: Optional[str] = None) -> List[Dict[str, Any]]:
+        rows = self._store.list_rows("entity_semantic_links", limit=1000)
+        return [
+            {**self._store.parse_snapshot(row), "id": row.get("id")}
+            for row in rows
+            if (entity_id is None or row.get("entity_id") == entity_id)
+            and (entity_type is None or row.get("entity_type") == entity_type)
+            and (iri is None or row.get("iri") == iri)
+        ]
+
+    def remove_semantic_link(self, link_id: str) -> bool:
+        return self.remove("entity_semantic_links", link_id)
+
+    def subscribe(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self.add("entity_subscriptions", payload)
+
+    def unsubscribe(self, subscription_id: str) -> bool:
+        return self.remove("entity_subscriptions", subscription_id)
+
+    def list_cost_items(self, entity_type: str, entity_id: str) -> List[Dict[str, Any]]:
+        return self.list_for_entity("cost_items", entity_type, entity_id)
+
+    def list_quality_items(self, entity_type: str, entity_id: str) -> List[Dict[str, Any]]:
+        return self.list_for_entity("quality_items", entity_type, entity_id)
+
+    def mark_notification_read(self, notification_id: str) -> Optional[Dict[str, Any]]:
+        notification = self.get("notifications", notification_id)
+        if not notification:
+            return None
+        notification["read"] = True
+        return self.add("notifications", notification)
+
+    def get_notification_by_id(self, notification_id: str) -> Optional[Dict[str, Any]]:
+        return self.get("notifications", notification_id)
