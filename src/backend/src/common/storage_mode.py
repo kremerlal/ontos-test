@@ -58,7 +58,10 @@ UC_READONLY_CAPABILITIES: List[str] = [
     "audit_volume",
 ]
 
-# UC-native managers persist these features in Delta tables; no Postgres is used.
+# Capabilities advertised for STORAGE_MODE=uc_native.
+# Only include features with UC managers wired in ``uc_native/startup.py``.
+# Partial panels (MDM match runs, compliance scoring, agreements) stay off the
+# list until Delta writers exist beyond config CRUD stubs.
 UC_NATIVE_CAPABILITIES: List[str] = [
     *UC_CAPABILITIES,
     "crud_entities",
@@ -66,7 +69,6 @@ UC_NATIVE_CAPABILITIES: List[str] = [
     "workflows",
     "rdf_glossary_edit",
     "access_grants",
-    "agreements",
     "mdm",
     "term_mapping",
     "ontology_generator",

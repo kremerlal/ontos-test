@@ -1,3 +1,5 @@
+# UC-native note: set storage_mode=uc_native and leave lakebase_instance_name empty.
+# Job entrypoints soft-skip Postgres writers until migrated to Delta stores.
 name: "Data Contract Validation"
 description: "Validate data contracts against Unity Catalog (schema drift, SLA, DQ status)"
 format: "MULTI_TASK"
@@ -33,6 +35,8 @@ tasks:
         - "{{job.parameters.verbose}}"
         - "--lakebase_instance_name"
         - "{{job.parameters.lakebase_instance_name}}"
+        - "--storage_mode"
+        - "{{job.parameters.storage_mode}}"
         - "--postgres_host"
         - "{{job.parameters.postgres_host}}"
         - "--postgres_db"
@@ -64,6 +68,8 @@ parameters:
   dq_score_threshold: "95.0"
   verbose: "false"
   lakebase_instance_name: ""
+  # Empty/omit for STORAGE_MODE=uc_native (Delta SoR; no Lakebase OLTP).
+  storage_mode: "uc_native"
   postgres_host: ""
   postgres_db: ""
   postgres_port: "5432"

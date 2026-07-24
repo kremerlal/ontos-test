@@ -558,9 +558,10 @@ def main() -> None:
     parser.add_argument("--verbose", type=str, default="false")
 
     # Database connection parameters
-    parser.add_argument("--lakebase_instance_name", type=str, required=True)
-    parser.add_argument("--postgres_host", type=str, required=True)
-    parser.add_argument("--postgres_db", type=str, required=True)
+    parser.add_argument("--lakebase_instance_name", type=str, default="")
+    parser.add_argument("--storage_mode", type=str, default="")
+    parser.add_argument("--postgres_host", type=str, default="")
+    parser.add_argument("--postgres_db", type=str, default="")
     parser.add_argument("--postgres_port", type=str, default="5432")
     parser.add_argument("--postgres_schema", type=str, default="public")
     # Telemetry parameters (passed from app)
@@ -568,6 +569,23 @@ def main() -> None:
     parser.add_argument("--product_version", type=str, default="0.0.0")
 
     args, _ = parser.parse_known_args()
+    try:
+        from workflows.common.uc_native_runtime import (
+            lakebase_skip_message,
+            should_use_lakebase_oltp,
+        )
+    except ImportError:
+        from src.workflows.common.uc_native_runtime import (  # type: ignore
+            lakebase_skip_message,
+            should_use_lakebase_oltp,
+        )
+    if not should_use_lakebase_oltp(
+        storage_mode=getattr(args, "storage_mode", None),
+        lakebase_instance_name=getattr(args, "lakebase_instance_name", None),
+    ):
+        print(lakebase_skip_message('data_quality_checks'))
+        return
+
 
     # Parse arguments
     try:
