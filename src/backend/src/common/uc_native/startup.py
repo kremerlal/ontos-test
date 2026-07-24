@@ -117,6 +117,9 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
 
     entities = UcNativeEntityStore(store)
     overlays = UcNativeOverlayStore(store)
+    audit_manager = getattr(app.state, "audit_manager", None)
+    if audit_manager and hasattr(audit_manager, "set_uc_overlays"):
+        audit_manager.set_uc_overlays(overlays)
 
     # Permissions first — home page depends on these managers.
     settings_manager = UcNativeSettingsManager(store, settings)

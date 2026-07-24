@@ -10,7 +10,13 @@ from uuid import UUID, uuid4
 from src.common.logging import get_logger
 from src.common.uc_native.overlays import UcNativeOverlayStore
 from src.common.uc_native.workflows import UcNativeWorkflowStore
-from src.models.comments import Comment, CommentCreate
+from src.models.comments import (
+    Comment,
+    CommentCreate,
+    CommentListResponse,
+    CommentType,
+    RatingAggregation,
+)
 from src.models.notifications import Notification, NotificationType
 from src.models.users import UserInfo
 
@@ -25,57 +31,176 @@ class UcNativeCommentsManager:
         self,
         db,
         *,
-        comment_in: CommentCreate,
-        author_email: str,
+        comment_in: Optional[CommentCreate] = None,
+        data: Optional[CommentCreate] = None,
+        author_email: Optional[str] = None,
+        user_email: Optional[str] = None,
         **_,
     ) -> Comment:
+        comment_in = comment_in or data
+        if comment_in is None:
+            raise ValueError("Comment data is required")
+        author_email = author_email or user_email or "unknown"
         row = self._overlays.add_comment(
             entity_type=comment_in.entity_type,
             entity_id=str(comment_in.entity_id),
             author=author_email,
             body=comment_in.comment,
         )
+        row.update(
+            {
+                "title": comment_in.title,
+                "audience": comment_in.audience,
+                "project_id": comment_in.project_id,
+                "comment_type": comment_in.comment_type.value,
+                "rating": comment_in.rating,
+            }
+        )
+        return self._to_comment(self._overlays.add("comments", row))
+
+    def _to_comment(self, row: Dict[str, Any]) -> Comment:
         now = datetime.now(timezone.utc)
+        comment_type = row.get("comment_type", CommentType.COMMENT)
         return Comment(
-            id=UUID(row["id"]),
-            entity_type=comment_in.entity_type,
-            entity_id=str(comment_in.entity_id),
-            comment=comment_in.comment,
-            created_by=author_email,
+            id=UUID(str(row.get("id"))),
+            entity_type=row.get("entity_type", ""),
+            entity_id=str(row.get("entity_id", "")),
+            title=row.get("title"),
+            comment=row.get("body", row.get("comment", "")),
+            audience=row.get("audience"),
+            project_id=row.get("project_id"),
+            comment_type=comment_type,
+            rating=row.get("rating"),
+            created_by=row.get("author", row.get("created_by", "unknown")),
+            updated_by=row.get("updated_by"),
             created_at=now,
             updated_at=now,
         )
 
-    def list_comments(self, db, *, entity_type: str, entity_id: str, **_) -> List[Comment]:
+    def list_comments(self, db, *, entity_type: str, entity_id: str, **_) -> CommentListResponse:
         rows = self._overlays.list_comments(entity_type, entity_id)
-        comments: List[Comment] = []
-        for row in rows:
-            now = datetime.now(timezone.utc)
-            comments.append(
-                Comment(
-                    id=UUID(row.get("id", str(uuid4()))),
-                    entity_type=entity_type,
-                    entity_id=entity_id,
-                    comment=row.get("body", ""),
-                    created_by=row.get("author", "unknown"),
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-        return comments
+        comments = [
+            self._to_comment({**row, "entity_type": entity_type, "entity_id": entity_id})
+            for row in rows
+            if row.get("comment_type", CommentType.COMMENT) != CommentType.RATING.value
+        ]
+        return CommentListResponse(
+            comments=comments, total_count=len(comments), visible_count=len(comments)
+        )
 
-    def update_comment(self, db, comment_id: str, comment_in=None, **_) -> Optional[Comment]:
+    def get_comment(self, db, *, comment_id: str, **_) -> Optional[Comment]:
         row = self._overlays.get("comments", str(comment_id))
-        if not row:
-            return None
-        data = comment_in.model_dump(exclude_unset=True) if hasattr(comment_in, "model_dump") else dict(comment_in or {})
-        row["body"] = data.get("comment", data.get("body", row.get("body", "")))
-        saved = self._overlays.add("comments", row)
-        now = datetime.now(timezone.utc)
-        return Comment(id=UUID(str(saved["id"])), entity_type=saved.get("entity_type", ""), entity_id=saved.get("entity_id", ""), comment=saved.get("body", ""), created_by=saved.get("author", "unknown"), created_at=now, updated_at=now)
+        return self._to_comment(row) if row else None
 
-    def delete_comment(self, db, comment_id: str, **_) -> bool:
+    def can_user_modify_comment(
+        self,
+        db,
+        *,
+        comment: Optional[Comment] = None,
+        comment_id: Optional[str] = None,
+        user_email: str,
+        user_groups: Optional[List[str]] = None,
+        is_admin: bool = False,
+        **_,
+    ) -> bool:
+        if comment is None and comment_id:
+            comment = self.get_comment(db, comment_id=comment_id)
+        return bool(comment and comment.created_by == user_email)
+
+    def update_comment(
+        self,
+        db,
+        comment_id: str,
+        comment_in=None,
+        data=None,
+        user_email: Optional[str] = None,
+        **_,
+    ) -> Optional[Comment]:
+        row = self._overlays.get("comments", str(comment_id))
+        if not row or (user_email and row.get("author") != user_email):
+            return None
+        updates = data or comment_in
+        data = updates.model_dump(exclude_unset=True) if hasattr(updates, "model_dump") else dict(updates or {})
+        row["body"] = data.get("comment", data.get("body", row.get("body", "")))
+        row.update({key: value for key, value in data.items() if key in {"title", "audience"}})
+        row["updated_by"] = user_email
+        saved = self._overlays.add("comments", row)
+        return self._to_comment(saved)
+
+    def delete_comment(
+        self, db, comment_id: str, user_email: Optional[str] = None, **_
+    ) -> bool:
+        row = self._overlays.get("comments", str(comment_id))
+        if not row or (user_email and row.get("author") != user_email):
+            return False
         return self._overlays.remove("comments", str(comment_id))
+
+    def create_rating(
+        self,
+        db,
+        *,
+        entity_type: str,
+        entity_id: str,
+        rating: int,
+        comment: Optional[str] = None,
+        project_id: Optional[str] = None,
+        user_email: str,
+    ) -> Comment:
+        rating_comment = CommentCreate(
+            entity_type=entity_type,
+            entity_id=str(entity_id),
+            comment=comment or f"{rating} star rating",
+            comment_type=CommentType.RATING,
+            rating=rating,
+            project_id=project_id,
+        )
+        return self.create_comment(db, data=rating_comment, user_email=user_email)
+
+    def list_ratings(
+        self,
+        db,
+        *,
+        entity_type: str,
+        entity_id: str,
+        user_email: Optional[str] = None,
+    ) -> CommentListResponse:
+        rows = self._overlays.list_comments(entity_type, entity_id)
+        ratings = [
+            self._to_comment({**row, "entity_type": entity_type, "entity_id": entity_id})
+            for row in rows
+            if row.get("comment_type") == CommentType.RATING.value
+            and (user_email is None or row.get("author") == user_email)
+        ]
+        return CommentListResponse(
+            comments=ratings, total_count=len(ratings), visible_count=len(ratings)
+        )
+
+    def get_rating_aggregation(
+        self,
+        db,
+        *,
+        entity_type: str,
+        entity_id: str,
+        user_email: Optional[str] = None,
+    ) -> RatingAggregation:
+        ratings = self.list_ratings(db, entity_type=entity_type, entity_id=entity_id)
+        distribution = {value: 0 for value in range(1, 6)}
+        user_current_rating = None
+        for item in ratings.comments:
+            if item.rating:
+                distribution[item.rating] += 1
+                if item.created_by == user_email and user_current_rating is None:
+                    user_current_rating = item.rating
+        total = sum(distribution.values())
+        average = sum(value * count for value, count in distribution.items()) / total if total else 0.0
+        return RatingAggregation(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            average_rating=round(average, 2),
+            total_ratings=total,
+            distribution=distribution,
+            user_current_rating=user_current_rating,
+        )
 
 
 class UcNativeNotificationsManager:
@@ -114,7 +239,10 @@ class UcNativeNotificationsManager:
             )
         return items
 
-    def create_notification(self, notification: Notification, db) -> Notification:
+    def create_notification(self, notification: Notification = None, db=None, **kwargs) -> Notification:
+        notification = notification or kwargs.get("notification")
+        if notification is None:
+            raise ValueError("Notification is required")
         self._overlays.create_notification(
             username=notification.recipient or "unknown",
             title=notification.title,
@@ -133,6 +261,14 @@ class UcNativeNotificationsManager:
         if not row:
             return None
         return Notification(id=row["id"], title=row.get("title", ""), message=row.get("body", ""), type=NotificationType.INFO, read=bool(row.get("read")), created_at=datetime.now(timezone.utc), recipient=row.get("username"))
+
+    def delete_notification(self, db, notification_id: str) -> bool:
+        return self._overlays.remove("notifications", str(notification_id))
+
+    def can_user_access_notification(
+        self, db, notification: Notification, user_info: UserInfo
+    ) -> bool:
+        return bool(notification.recipient and notification.recipient == user_info.email)
 
 
 class UcNativeChangeLogManager:
@@ -156,6 +292,33 @@ class UcNativeChangeLogManager:
             username=username,
             details=details,
         )
+
+    def list_changes_for_entity(
+        self, db, *, entity_type: str, entity_id: str, limit: int = 100, **_
+    ) -> List[Any]:
+        from types import SimpleNamespace
+
+        rows = self._overlays.list_change_log(entity_type, str(entity_id), limit=limit)
+        changes = []
+        for row in rows:
+            timestamp = row.get("timestamp")
+            if isinstance(timestamp, str):
+                try:
+                    timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except ValueError:
+                    timestamp = datetime.now(timezone.utc)
+            changes.append(
+                SimpleNamespace(
+                    id=row.get("id", str(uuid4())),
+                    entity_type=row.get("entity_type", entity_type),
+                    entity_id=row.get("entity_id", str(entity_id)),
+                    action=row.get("action", ""),
+                    username=row.get("username"),
+                    timestamp=timestamp or datetime.now(timezone.utc),
+                    details_json=row.get("details_json"),
+                )
+            )
+        return changes
 
 
 class UcNativeJobsManager:

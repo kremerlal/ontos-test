@@ -1,7 +1,9 @@
 import asyncio
+import json
 import logging
 import os
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,11 +26,48 @@ file_audit_logger.propagate = False
 class AuditManager:
     """Manages logging of user actions to file and database."""
 
-    def __init__(self, settings: Settings, db_session: Session):
+    def __init__(
+        self,
+        settings: Settings,
+        db_session: Optional[Session],
+        overlay_store=None,
+        uc_store=None,
+    ):
         self.settings = settings
         self.db = db_session # Store session for potential direct use if needed, though repo is preferred
         self.repository = audit_log_repository
+        self._uc_overlays = overlay_store
+        self._uc_store = uc_store
         self._configure_file_logger()
+
+    def set_uc_overlays(self, overlays) -> None:
+        """Attach the UC-native overlay store after startup creates it."""
+        self._uc_overlays = overlays
+
+    def _get_uc_store(self):
+        return self._uc_store or getattr(self._uc_overlays, "_store", None) or self._uc_overlays
+
+    def _write_uc_audit_event(self, log_entry_data: Dict[str, Any]) -> None:
+        store = self._get_uc_store()
+        if not store or not hasattr(store, "merge_row"):
+            return
+        try:
+            store.merge_row(
+                "audit_events",
+                {
+                    "id": str(uuid.uuid4()),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "username": log_entry_data["username"],
+                    "feature": log_entry_data["feature"],
+                    "action": log_entry_data["action"],
+                    "success": log_entry_data["success"],
+                    "details_json": json.dumps(log_entry_data["details"], default=str),
+                },
+            )
+        except Exception:
+            get_logger(__name__).warning(
+                "Failed to write UC-native audit event", exc_info=True
+            )
 
     def _configure_file_logger(self):
         """Configures the file logger for audit trails."""
@@ -93,6 +132,7 @@ class AuditManager:
 
         # 2. Log to database (optional when APP_AUDIT_VOLUME_ONLY or no session)
         if getattr(self.settings, "APP_AUDIT_VOLUME_ONLY", False) or db is None:
+            self._write_uc_audit_event(log_entry_data)
             return
         try:
             log_entry = AuditLogCreate(**log_entry_data)
@@ -102,6 +142,7 @@ class AuditManager:
             main_logger = get_logger(__name__)
             main_logger.error(f"Failed to write audit log to database: {e}", exc_info=True)
             db.rollback() # Rollback only the audit transaction on error
+            self._write_uc_audit_event(log_entry_data)
             # Do not re-raise here, as it's a background task
 
     # Original log_action (now uses independent session and commits)
@@ -200,31 +241,105 @@ class AuditManager:
         success: Optional[bool] = None,
     ) -> tuple[int, List[AuditLogRead]]:
         """Retrieves audit logs from the database with filtering and pagination."""
+        if db is not None and db.__class__.__name__ != "NoOpSession":
+            try:
+                total_count = self.repository.get_multi_count(
+                    db,
+                    start_time=start_time,
+                    end_time=end_time,
+                    username=username,
+                    feature=feature,
+                    action=action,
+                    success=success,
+                )
+                db_logs = self.repository.get_multi(
+                    db,
+                    skip=skip,
+                    limit=limit,
+                    start_time=start_time,
+                    end_time=end_time,
+                    username=username,
+                    feature=feature,
+                    action=action,
+                    success=success,
+                )
+                return total_count, [AuditLogRead.model_validate(log) for log in db_logs]
+            except Exception:
+                get_logger(__name__).warning(
+                    "Failed to retrieve audit logs from database; falling back to UC",
+                    exc_info=True,
+                )
+        return self._get_uc_audit_logs(
+            skip=skip,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            username=username,
+            feature=feature,
+            action=action,
+            success=success,
+        )
+
+    def _get_uc_audit_logs(
+        self,
+        *,
+        skip: int,
+        limit: int,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+        username: Optional[str],
+        feature: Optional[str],
+        action: Optional[str],
+        success: Optional[bool],
+    ) -> tuple[int, List[AuditLogRead]]:
+        store = self._get_uc_store()
+        if not store or not hasattr(store, "list_rows"):
+            return 0, []
         try:
-            total_count = self.repository.get_multi_count(
-                db,
-                start_time=start_time,
-                end_time=end_time,
-                username=username,
-                feature=feature,
-                action=action,
-                success=success,
+            try:
+                rows = store.list_rows(
+                    "audit_events", limit=2000, order_by="timestamp DESC"
+                )
+            except TypeError:
+                rows = store.list_rows("audit_events", limit=2000)
+            logs = []
+            for row in rows:
+                timestamp = row.get("timestamp")
+                if isinstance(timestamp, str):
+                    timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                if not isinstance(timestamp, datetime):
+                    timestamp = datetime.now(timezone.utc)
+                if (
+                    (start_time and timestamp < start_time)
+                    or (end_time and timestamp > end_time)
+                    or (username and row.get("username") != username)
+                    or (feature and row.get("feature") != feature)
+                    or (action and row.get("action") != action)
+                    or (success is not None and bool(row.get("success")) != success)
+                ):
+                    continue
+                details = row.get("details_json")
+                if isinstance(details, str):
+                    try:
+                        details = json.loads(details)
+                    except json.JSONDecodeError:
+                        details = {}
+                logs.append(
+                    AuditLogRead(
+                        id=row.get("id"),
+                        timestamp=timestamp,
+                        username=row.get("username", ""),
+                        ip_address=None,
+                        feature=row.get("feature", ""),
+                        action=row.get("action", ""),
+                        success=bool(row.get("success")),
+                        details=details or {},
+                    )
+                )
+            logs.sort(key=lambda log: log.timestamp, reverse=True)
+            return len(logs), logs[skip : skip + limit]
+        except Exception:
+            get_logger(__name__).warning(
+                "Failed to retrieve UC-native audit logs", exc_info=True
             )
-            db_logs = self.repository.get_multi(
-                db,
-                skip=skip,
-                limit=limit,
-                start_time=start_time,
-                end_time=end_time,
-                username=username,
-                feature=feature,
-                action=action,
-                success=success,
-            )
-            # Convert DB models to Pydantic models for response
-            return total_count, [AuditLogRead.model_validate(log) for log in db_logs]
-        except Exception as e:
-            main_logger = get_logger(__name__)
-            main_logger.error(f"Failed to retrieve audit logs from database: {e}", exc_info=True)
-            # Return empty list or re-raise
-            return 0, [] 
+            return 0, []

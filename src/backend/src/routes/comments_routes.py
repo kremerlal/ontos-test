@@ -212,7 +212,10 @@ async def get_entity_timeline_count(
 
         if filter_type in ("all", "changes"):
             # Get change log entries count
-            change_entries = change_log_manager.list_changes_for_entity(
+            active_change_log_manager = getattr(
+                request.app.state, "change_log_manager", change_log_manager
+            )
+            change_entries = active_change_log_manager.list_changes_for_entity(
                 db,
                 entity_type=entity_type,
                 entity_id=entity_id,
@@ -307,7 +310,10 @@ async def get_entity_timeline(
         
         if filter_type in ("all", "changes"):
             # Get change log entries
-            change_entries = change_log_manager.list_changes_for_entity(
+            active_change_log_manager = getattr(
+                request.app.state, "change_log_manager", change_log_manager
+            )
+            change_entries = active_change_log_manager.list_changes_for_entity(
                 db,
                 entity_type=entity_type,
                 entity_id=entity_id,
@@ -501,6 +507,7 @@ async def delete_comment(
 @router.get("/comments/{comment_id}/permissions")
 async def check_comment_permissions(
     comment_id: str,
+    request: Request,
     db: DBSessionDep,
     current_user: CurrentUserDep,
     manager: CommentsManager = Depends(get_comments_manager),
