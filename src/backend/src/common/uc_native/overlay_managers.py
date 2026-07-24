@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
@@ -158,7 +159,7 @@ class UcNativeChangeLogManager:
 
 
 class UcNativeJobsManager:
-    """Minimal Jobs manager for uc_native — run history via Jobs API, installs in Delta."""
+    """Jobs API adapter with UC Delta-backed workflow installation metadata."""
 
     def __init__(self, workflows: UcNativeWorkflowStore, ws_client, settings) -> None:
         self._workflows = workflows
@@ -166,6 +167,12 @@ class UcNativeJobsManager:
         self._settings = settings
 
     def list_installations(self, db=None) -> List[Dict[str, Any]]:
+        store = getattr(self._workflows, "_store", None)
+        if store and hasattr(store, "list_rows"):
+            try:
+                return [self._hydrate_installation(row) for row in store.list_rows("workflow_installations", limit=200)]
+            except Exception:
+                logger.warning("Failed to list UC-native workflow installations", exc_info=True)
         return self._workflows.list_workflow_definitions()
 
     def record_installation(
@@ -180,13 +187,165 @@ class UcNativeJobsManager:
             metadata=metadata,
         )
 
-    def cancel_run(self, *_, **__) -> bool: return False
-    def get_workflow_statuses(self, *_, **__) -> List[Dict[str, Any]]: return []
-    def run_job(self, *_, **__) -> Optional[int]: return None
-    def get_active_run_id(self, *_, **__) -> Optional[int]: return None
-    def pause_job(self, *_, **__) -> bool: return False
-    def resume_job(self, *_, **__) -> bool: return False
-    def get_job_status(self, *_, **__) -> Dict[str, Any]: return {}
-    def get_workflow_parameter_definitions(self, *_, **__) -> List[Dict[str, Any]]: return []
-    def get_workflow_configuration(self, *_, **__) -> Dict[str, Any]: return {}
-    def update_workflow_configuration(self, *_, **__) -> Dict[str, Any]: return {}
+    def _hydrate_installation(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        store = getattr(self._workflows, "_store", None)
+        snapshot = store.parse_snapshot(row) if store and hasattr(store, "parse_snapshot") else {}
+        return {**row, **snapshot, "workflow_id": row.get("workflow_key", snapshot.get("workflow_id"))}
+
+    def _find_installation(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+        return next(
+            (
+                installation
+                for installation in self.list_installations()
+                if installation.get("workflow_id") == workflow_id
+                or installation.get("workflow_key") == workflow_id
+            ),
+            None,
+        )
+
+    def cancel_run(self, run_id: int) -> bool:
+        if not self._client:
+            return False
+        self._client.jobs.cancel_run(run_id=run_id)
+        return True
+
+    def run_job(
+        self,
+        job_id: int,
+        job_name: Optional[str] = None,
+        job_parameters: Optional[Dict[str, str]] = None,
+        workflow_id: Optional[str] = None,
+    ) -> Optional[int]:
+        if not self._client:
+            return None
+        parameters = self.get_workflow_configuration(workflow_id) if workflow_id else {}
+        if job_parameters:
+            parameters.update(job_parameters)
+        kwargs: Dict[str, Any] = {"job_id": job_id}
+        if parameters:
+            kwargs["job_parameters"] = {key: str(value) for key, value in parameters.items()}
+        run = self._client.jobs.run_now(**kwargs)
+        return int(run.run_id)
+
+    def get_active_run_id(self, job_id: int) -> Optional[int]:
+        if not self._client:
+            return None
+        try:
+            for run in self._client.jobs.list_runs(job_id=job_id, active_only=True):
+                if getattr(run, "run_id", None) is not None:
+                    return int(run.run_id)
+        except Exception:
+            logger.warning("Failed to list active runs for job %s", job_id, exc_info=True)
+        return None
+
+    def _set_pause_status(self, job_id: int, paused: bool) -> bool:
+        if not self._client:
+            return False
+        try:
+            from databricks.sdk.service import jobs
+
+            job = self._client.jobs.get(job_id=job_id)
+            settings = getattr(job, "settings", None)
+            if not settings:
+                return False
+            pause_status = jobs.PauseStatus.PAUSED if paused else jobs.PauseStatus.UNPAUSED
+            schedule = getattr(settings, "schedule", None)
+            if schedule:
+                new_settings = jobs.JobSettings(
+                    schedule=jobs.CronSchedule(
+                        quartz_cron_expression=schedule.quartz_cron_expression,
+                        timezone_id=schedule.timezone_id or "UTC",
+                        pause_status=pause_status,
+                    )
+                )
+            elif getattr(settings, "continuous", None):
+                new_settings = jobs.JobSettings(continuous=jobs.Continuous(pause_status=pause_status))
+            else:
+                return False
+            self._client.jobs.update(job_id=job_id, new_settings=new_settings)
+            return True
+        except Exception:
+            logger.warning("Failed to update pause status for job %s", job_id, exc_info=True)
+            return False
+
+    def pause_job(self, job_id: int) -> bool:
+        return self._set_pause_status(job_id, paused=True)
+
+    def resume_job(self, job_id: int) -> bool:
+        return self._set_pause_status(job_id, paused=False)
+
+    def get_job_status(self, run_id: int) -> Optional[Dict[str, Any]]:
+        if not self._client:
+            return None
+        try:
+            run = self._client.jobs.get_run(run_id=run_id)
+            state = getattr(run, "state", None)
+            return {
+                "run_id": run_id,
+                "job_id": getattr(run, "job_id", None),
+                "life_cycle_state": getattr(getattr(state, "life_cycle_state", None), "value", getattr(state, "life_cycle_state", None)),
+                "result_state": getattr(getattr(state, "result_state", None), "value", getattr(state, "result_state", None)),
+                "start_time": getattr(run, "start_time", None),
+                "end_time": getattr(run, "end_time", None),
+            }
+        except Exception:
+            logger.warning("Failed to get status for run %s", run_id, exc_info=True)
+            return None
+
+    def get_workflow_statuses(self, workflow_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        statuses: Dict[str, Any] = {}
+        for installation in self.list_installations():
+            workflow_id = installation.get("workflow_id") or installation.get("workflow_key")
+            if not workflow_id or (workflow_ids and workflow_id not in workflow_ids):
+                continue
+            job_id = installation.get("job_id")
+            active_run_id = self.get_active_run_id(int(job_id)) if job_id is not None else None
+            statuses[workflow_id] = {
+                "installed": True,
+                "job_id": job_id,
+                "is_running": active_run_id is not None,
+                "current_run_id": active_run_id,
+            }
+        return statuses
+
+    def get_workflow_parameter_definitions(self, workflow_id: str) -> List[Dict[str, Any]]:
+        installation = self._find_installation(workflow_id)
+        if not installation:
+            return []
+        definitions = installation.get("parameter_definitions", [])
+        return definitions if isinstance(definitions, list) else []
+
+    def get_workflow_configuration(self, workflow_id: str) -> Dict[str, Any]:
+        installation = self._find_installation(workflow_id)
+        if not installation:
+            return {}
+        configuration = installation.get("configuration", {})
+        return dict(configuration) if isinstance(configuration, dict) else {}
+
+    def update_workflow_configuration(
+        self, workflow_id: str, configuration: Dict[str, Any]
+    ):
+        installation = self._find_installation(workflow_id)
+        if not installation:
+            return {}
+        store = getattr(self._workflows, "_store", None)
+        if store and hasattr(store, "merge_row"):
+            snapshot = {
+                key: value
+                for key, value in installation.items()
+                if key not in {"snapshot_json", "workflow_id"}
+            }
+            snapshot["configuration"] = dict(configuration)
+            row = {
+                "id": installation["id"],
+                "workflow_key": installation.get("workflow_key", workflow_id),
+                "job_id": installation.get("job_id"),
+                "snapshot_json": json.dumps(snapshot, default=str),
+            }
+            store.merge_row("workflow_installations", row)
+        try:
+            from src.models.workflow_configurations import WorkflowConfiguration
+
+            return WorkflowConfiguration(workflow_id=workflow_id, configuration=dict(configuration))
+        except Exception:
+            return {"workflow_id": workflow_id, "configuration": dict(configuration)}

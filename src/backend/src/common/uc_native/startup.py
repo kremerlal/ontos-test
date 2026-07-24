@@ -229,7 +229,10 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
     try:
         from src.controller.ontology_generator_manager import OntologyGeneratorManager
 
-        app.state.ontology_generator_manager = OntologyGeneratorManager(settings=settings)
+        app.state.ontology_generator_manager = OntologyGeneratorManager(
+            settings=settings,
+            run_store=entities,
+        )
         logger.info("OntologyGeneratorManager initialized for UC-native")
     except Exception as exc:
         health.setdefault("warnings", []).append(f"OntologyGeneratorManager unavailable: {exc}")

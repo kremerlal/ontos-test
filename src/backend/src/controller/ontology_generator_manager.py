@@ -52,6 +52,7 @@ class _MemoryRun:
     options: Optional[dict] = None
     steps: Optional[list] = None
     result: Optional[dict] = None
+    owl_content: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
@@ -226,11 +227,83 @@ TOOL_HANDLERS = {
 class OntologyGeneratorManager:
     """Generates OWL ontologies from metadata using an LLM agent loop."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, run_store=None):
         self._settings = settings
+        self._run_store = run_store
         self._cancel_events: Dict[str, threading.Event] = {}
         self._memory_runs: Dict[str, _MemoryRun] = {}
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _serialize_memory_run(run: _MemoryRun) -> Dict[str, Any]:
+        """Return a Delta-safe snapshot of an in-process generation run."""
+        return {
+            field_name: (
+                value.isoformat() if isinstance(value := getattr(run, field_name), datetime) else value
+            )
+            for field_name in run.__dataclass_fields__
+        }
+
+    @staticmethod
+    def _parse_snapshot_datetime(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+
+    def _hydrate_memory_run(self, snapshot: Dict[str, Any]) -> _MemoryRun:
+        """Hydrate a Delta snapshot so UC-native and ORM callers share a shape."""
+        fields = _MemoryRun.__dataclass_fields__
+        values = {
+            name: self._parse_snapshot_datetime(snapshot[name])
+            if name in {"created_at", "updated_at", "completed_at"}
+            else snapshot[name]
+            for name in fields
+            if name in snapshot
+        }
+        return _MemoryRun(**values)
+
+    def _persist_memory_run(self, run: _MemoryRun) -> None:
+        """Best-effort persistence for UC-native runs; memory remains authoritative."""
+        if not self._run_store:
+            return
+        try:
+            snapshot = self._serialize_memory_run(run)
+            self._run_store.save_entity(
+                "ontology_generation_runs",
+                snapshot,
+                index_fields={
+                    "user_id": run.user_id,
+                    "status": run.status,
+                    "updated_at": run.updated_at.isoformat(),
+                },
+            )
+        except Exception:
+            logger.warning("Failed to persist UC-native ontology run %s", run.id, exc_info=True)
+
+    def _stored_memory_run(self, run_id: str) -> Optional[_MemoryRun]:
+        if not self._run_store:
+            return None
+        try:
+            snapshot = self._run_store.get_entity("ontology_generation_runs", run_id)
+            return self._hydrate_memory_run(snapshot) if snapshot else None
+        except Exception:
+            logger.warning("Failed to load UC-native ontology run %s", run_id, exc_info=True)
+            return None
+
+    def _stored_memory_runs(self) -> List[_MemoryRun]:
+        if not self._run_store:
+            return []
+        try:
+            return [
+                self._hydrate_memory_run(snapshot)
+                for snapshot in self._run_store.list_entities("ontology_generation_runs", limit=500)
+            ]
+        except Exception:
+            logger.warning("Failed to list UC-native ontology runs", exc_info=True)
+            return []
 
     def _get_openai_client(self, user_token: Optional[str] = None):
         """Create an OpenAI client via the shared factory.
@@ -697,6 +770,7 @@ class OntologyGeneratorManager:
             )
             with self._lock:
                 self._memory_runs[run_id] = memory_run
+            self._persist_memory_run(memory_run)
         else:
             ontology_generation_runs_repo.create(
                 db,
@@ -738,6 +812,7 @@ class OntologyGeneratorManager:
             for key, value in fields.items():
                 setattr(run, key, value)
             run.updated_at = datetime.now(timezone.utc)
+        self._persist_memory_run(run)
 
     def _run_generation(
         self,
@@ -839,6 +914,7 @@ class OntologyGeneratorManager:
                         run_id,
                         steps=final_steps,
                         result=result_dict,
+                        owl_content=result.owl_content,
                         status="completed",
                         progress_message="Completed",
                         completed_at=datetime.now(timezone.utc),
@@ -912,7 +988,7 @@ class OntologyGeneratorManager:
         if memory is not None:
             return memory
         if _is_noop_db(db):
-            return None
+            return self._stored_memory_run(run_id)
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
         return ontology_generation_runs_repo.get(db, run_id)
 
@@ -932,7 +1008,13 @@ class OntologyGeneratorManager:
             ]
         memory_rows.sort(key=lambda r: r.created_at, reverse=True)
         if _is_noop_db(db):
-            return memory_rows[:limit]
+            by_id = {
+                run.id: run
+                for run in self._stored_memory_runs()
+                if run.user_id == user_id
+            }
+            by_id.update({run.id: run for run in memory_rows})
+            return sorted(by_id.values(), key=lambda r: r.created_at, reverse=True)[:limit]
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
         db_rows = ontology_generation_runs_repo.list_for_user(db, user_id, limit=limit)
         # Prefer memory rows for ids still in-flight on this process.
@@ -947,7 +1029,9 @@ class OntologyGeneratorManager:
             memory_rows = list(self._memory_runs.values())
         memory_rows.sort(key=lambda r: r.created_at, reverse=True)
         if _is_noop_db(db):
-            return memory_rows[:limit]
+            by_id = {run.id: run for run in self._stored_memory_runs()}
+            by_id.update({run.id: run for run in memory_rows})
+            return sorted(by_id.values(), key=lambda r: r.created_at, reverse=True)[:limit]
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
         db_rows = ontology_generation_runs_repo.list_all(db, limit=limit)
         by_id = {r.id: r for r in db_rows}
@@ -960,6 +1044,14 @@ class OntologyGeneratorManager:
         with self._lock:
             existed = self._memory_runs.pop(run_id, None) is not None
         if _is_noop_db(db):
+            if self._run_store:
+                try:
+                    stored = self._run_store.get_entity("ontology_generation_runs", run_id)
+                    if stored:
+                        self._run_store.delete_entity("ontology_generation_runs", run_id)
+                        existed = True
+                except Exception:
+                    logger.warning("Failed to delete UC-native ontology run %s", run_id, exc_info=True)
             return existed
         from src.repositories.ontology_generation_runs_repository import ontology_generation_runs_repo
         return ontology_generation_runs_repo.delete(db, run_id) or existed

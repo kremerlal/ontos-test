@@ -1,4 +1,5 @@
 """Focused UC-native manager tests without a warehouse."""
+import json
 from types import SimpleNamespace
 
 from src.common.manager_dependencies import get_jobs_manager
@@ -69,6 +70,82 @@ def test_term_mapping_run_persists_in_delta_entities():
 def test_jobs_list_installations_does_not_crash():
     workflows = SimpleNamespace(list_workflow_definitions=lambda: [])
     assert UcNativeJobsManager(workflows, None, None).list_installations() == []
+
+
+def test_jobs_manager_runs_and_cancels_with_workspace_client():
+    calls = []
+
+    class Jobs:
+        def run_now(self, **kwargs):
+            calls.append(("run_now", kwargs))
+            return SimpleNamespace(run_id=99)
+
+        def cancel_run(self, **kwargs):
+            calls.append(("cancel_run", kwargs))
+
+        def get_run(self, **kwargs):
+            return SimpleNamespace(
+                job_id=12,
+                state=SimpleNamespace(life_cycle_state="RUNNING", result_state=None),
+                start_time=1,
+                end_time=None,
+            )
+
+        def list_runs(self, **_):
+            return [SimpleNamespace(run_id=99)]
+
+    workflows = SimpleNamespace(list_workflow_definitions=lambda: [])
+    manager = UcNativeJobsManager(workflows, SimpleNamespace(jobs=Jobs()), None)
+
+    assert manager.run_job(12) == 99
+    assert manager.get_active_run_id(12) == 99
+    assert manager.get_job_status(99)["life_cycle_state"] == "RUNNING"
+    assert manager.cancel_run(99)
+    assert calls == [
+        ("run_now", {"job_id": 12}),
+        ("cancel_run", {"run_id": 99}),
+    ]
+
+
+def test_jobs_manager_uses_delta_workflow_installations_for_configuration():
+    class Store:
+        def __init__(self):
+            self.row = {
+                "id": "installation-1",
+                "workflow_key": "bulk_import",
+                "job_id": 12,
+                "snapshot_json": json.dumps(
+                    {
+                        "configuration": {"catalog": "main"},
+                        "parameter_definitions": [{"name": "catalog", "type": "string"}],
+                    }
+                ),
+            }
+
+        def list_rows(self, table, **_):
+            assert table == "workflow_installations"
+            return [self.row]
+
+        def parse_snapshot(self, row):
+            return json.loads(row["snapshot_json"])
+
+        def merge_row(self, table, row):
+            assert table == "workflow_installations"
+            self.row = row
+
+    store = Store()
+    workflows = SimpleNamespace(_store=store, list_workflow_definitions=lambda: [])
+    manager = UcNativeJobsManager(workflows, None, None)
+
+    assert manager.list_installations()[0]["workflow_id"] == "bulk_import"
+    assert manager.get_workflow_parameter_definitions("bulk_import") == [
+        {"name": "catalog", "type": "string"}
+    ]
+    assert manager.get_workflow_configuration("bulk_import") == {"catalog": "main"}
+    assert manager.update_workflow_configuration("bulk_import", {"catalog": "prod"}).configuration == {
+        "catalog": "prod"
+    }
+    assert manager.get_workflow_configuration("bulk_import") == {"catalog": "prod"}
 
 
 def test_get_jobs_manager_prefers_app_state():
