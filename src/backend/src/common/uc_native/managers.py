@@ -1174,3 +1174,50 @@ class UcNativeConnectionsManager:
             },
         )
         logger.info("Created system Databricks UC connection (UC-native)")
+
+
+def _uc_search_items(manager: Any, table: str, item_type: str, feature_id: str, link_prefix: str):
+    """Build the common search shape without introducing another storage path."""
+    from src.common.search_interfaces import SearchIndexItem
+
+    return [
+        SearchIndexItem(
+            id=f"{item_type}::{doc['id']}",
+            type=item_type,
+            title=doc.get("name") or "Unnamed",
+            description=doc.get("description"),
+            link=f"{link_prefix}/{doc['id']}",
+            tags=[str(tag) for tag in doc.get("tags", [])],
+            feature_id=feature_id,
+            extra_data={"status": doc.get("status")},
+        )
+        for doc in manager._entities.list_entities(table, limit=10_000)
+        if doc.get("id")
+    ]
+
+
+def _products_search_items(self):
+    return _uc_search_items(self, "data_products", "data-product", "data-products", "/data-products")
+
+
+def _contracts_search_items(self):
+    return _uc_search_items(self, "data_contracts", "data-contract", "data-contracts", "/data-contracts")
+
+
+def _domains_search_items(self):
+    return _uc_search_items(self, "data_domains", "data-domain", "data-domains", "/data-domains")
+
+
+def _assets_search_items(self):
+    return _uc_search_items(self, "assets", "asset", "assets", "/assets")
+
+
+def _tags_search_items(self):
+    return _uc_search_items(self, "tags", "tag", "tags", "/tags")
+
+
+UcNativeDataProductsManager.get_search_index_items = _products_search_items
+UcNativeDataContractsManager.get_search_index_items = _contracts_search_items
+UcNativeDataDomainManager.get_search_index_items = _domains_search_items
+UcNativeAssetsManager.get_search_index_items = _assets_search_items
+UcNativeTagsManager.get_search_index_items = _tags_search_items

@@ -63,6 +63,19 @@ class UcNativeCommentsManager:
             )
         return comments
 
+    def update_comment(self, db, comment_id: str, comment_in=None, **_) -> Optional[Comment]:
+        row = self._overlays.get("comments", str(comment_id))
+        if not row:
+            return None
+        data = comment_in.model_dump(exclude_unset=True) if hasattr(comment_in, "model_dump") else dict(comment_in or {})
+        row["body"] = data.get("comment", data.get("body", row.get("body", "")))
+        saved = self._overlays.add("comments", row)
+        now = datetime.now(timezone.utc)
+        return Comment(id=UUID(str(saved["id"])), entity_type=saved.get("entity_type", ""), entity_id=saved.get("entity_id", ""), comment=saved.get("body", ""), created_by=saved.get("author", "unknown"), created_at=now, updated_at=now)
+
+    def delete_comment(self, db, comment_id: str, **_) -> bool:
+        return self._overlays.remove("comments", str(comment_id))
+
 
 class UcNativeNotificationsManager:
     def __init__(self, overlays: UcNativeOverlayStore, settings_manager) -> None:
@@ -109,10 +122,16 @@ class UcNativeNotificationsManager:
         return notification
 
     def mark_notification_read(self, db, notification_id: str) -> Optional[Notification]:
-        return None
+        row = self._overlays.mark_notification_read(str(notification_id))
+        if not row:
+            return None
+        return Notification(id=row["id"], title=row.get("title", ""), message=row.get("body", ""), type=NotificationType.INFO, read=True, created_at=datetime.now(timezone.utc), recipient=row.get("username"))
 
     def get_notification_by_id(self, db, notification_id: str) -> Optional[Notification]:
-        return None
+        row = self._overlays.get_notification_by_id(str(notification_id))
+        if not row:
+            return None
+        return Notification(id=row["id"], title=row.get("title", ""), message=row.get("body", ""), type=NotificationType.INFO, read=bool(row.get("read")), created_at=datetime.now(timezone.utc), recipient=row.get("username"))
 
 
 class UcNativeChangeLogManager:
@@ -160,3 +179,14 @@ class UcNativeJobsManager:
             job_id=job_id,
             metadata=metadata,
         )
+
+    def cancel_run(self, *_, **__) -> bool: return False
+    def get_workflow_statuses(self, *_, **__) -> List[Dict[str, Any]]: return []
+    def run_job(self, *_, **__) -> Optional[int]: return None
+    def get_active_run_id(self, *_, **__) -> Optional[int]: return None
+    def pause_job(self, *_, **__) -> bool: return False
+    def resume_job(self, *_, **__) -> bool: return False
+    def get_job_status(self, *_, **__) -> Dict[str, Any]: return {}
+    def get_workflow_parameter_definitions(self, *_, **__) -> List[Dict[str, Any]]: return []
+    def get_workflow_configuration(self, *_, **__) -> Dict[str, Any]: return {}
+    def update_workflow_configuration(self, *_, **__) -> Dict[str, Any]: return {}
