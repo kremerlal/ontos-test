@@ -364,7 +364,18 @@ class OntologyGeneratorManager:
                 logger.warning("Max depth %d reached at path %s — skipping", max_depth, path)
                 return
 
-            meta = connector.get_asset_metadata(path)
+            # get_asset_metadata can raise (permissions / UC errors). Never let one
+            # bad path abort the whole generation start request.
+            try:
+                meta = connector.get_asset_metadata(path)
+            except Exception as exc:
+                logger.warning(
+                    "get_asset_metadata failed for %s during ontology generation: %s",
+                    path,
+                    exc,
+                )
+                meta = None
+
             if meta and meta.schema_info and meta.schema_info.columns:
                 cols = [
                     {"name": c.name, "type": c.data_type, "comment": c.description or ""}
@@ -384,15 +395,15 @@ class OntologyGeneratorManager:
                     child_path = child.get("path", "")
                     if child_path:
                         _collect(child_path, depth + 1)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("list_containers failed for %s: %s", path, exc)
 
             try:
                 assets = connector.list_assets(ListAssetsOptions(path=path, limit=200))
                 for asset in assets:
                     _collect(asset.identifier, depth + 1)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("list_assets failed for %s: %s", path, exc)
 
         for p in selected_paths:
             _collect(p)

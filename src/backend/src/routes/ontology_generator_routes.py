@@ -54,6 +54,39 @@ def _get_user_token(request: Request) -> Optional[str]:
     return request.headers.get("x-forwarded-access-token")
 
 
+def _ensure_llm_ready(manager: OntologyGeneratorManager) -> None:
+    """Fail fast with a clear error when generation cannot run."""
+    settings = getattr(manager, "_settings", None)
+    if settings is None:
+        return
+    if not getattr(settings, "LLM_ENABLED", False):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Ontology generation requires LLM_ENABLED=true. "
+                "Enable it in the Databricks App config and bind a serving endpoint."
+            ),
+        )
+    if not getattr(settings, "LLM_ENDPOINT", None):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Ontology generation requires LLM_ENDPOINT. "
+                "Bind a Model Serving endpoint resource to this app."
+            ),
+        )
+
+
+def _safe_audit_log(audit_manager, **kwargs) -> None:
+    """Never let audit logging turn a successful/handled response into a 500."""
+    if audit_manager is None:
+        return
+    try:
+        audit_manager.log_action(**kwargs)
+    except Exception:
+        logger.exception("Audit log failed for ontology generator action")
+
+
 # ------------------------------------------------------------------
 # Helpers to convert DB rows to response models
 # ------------------------------------------------------------------
@@ -143,6 +176,7 @@ def generate_ontology(
     }
 
     try:
+        _ensure_llm_ready(manager)
         metadata_dict = {"tables": [t.model_dump() for t in body.metadata.tables]}
         options = {
             "includeDataProperties": body.include_data_properties,
@@ -164,8 +198,13 @@ def generate_ontology(
         details["run_id"] = run_id
         return StartRunResponse(run_id=run_id, status=GenerationRunStatus.PENDING)
 
+    except HTTPException:
+        raise
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
+        # Concurrent-run cap is the only ValueError that maps to 429.
+        if "Concurrent run limit" in str(e):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.exception("Failed to start ontology generation run")
         details["exception"] = {"type": type(e).__name__, "message": str(e)}
@@ -174,9 +213,10 @@ def generate_ontology(
             detail=f"Failed to start generation: {e}",
         )
     finally:
-        audit_manager.log_action(
+        _safe_audit_log(
+            audit_manager,
             db=db,
-            username=current_user.username,
+            username=getattr(current_user, "username", None) or "unknown",
             ip_address=request.client.host if request.client else None,
             feature=FEATURE_ID,
             action="START_ONTOLOGY_GENERATION",
@@ -209,6 +249,7 @@ def generate_from_connection(
     }
 
     try:
+        _ensure_llm_ready(manager)
         # Prefer the app-wired connections manager (UC-native or Lakebase).
         # Instantiating a fresh ConnectionsManager(db=...) fails in uc_native
         # because the NoOp session has no connection rows.
@@ -219,7 +260,12 @@ def generate_from_connection(
             ws = get_obo_workspace_client(request)
             conn_mgr = ConnectionsManager(db=db, workspace_client=ws)
 
-        connector = conn_mgr.get_connector_for_connection(UUID(body.connection_id))
+        try:
+            connection_uuid = UUID(body.connection_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid connection_id: {e}")
+
+        connector = conn_mgr.get_connector_for_connection(connection_uuid)
         if connector is None:
             raise HTTPException(status_code=404, detail="Connection not found")
 
@@ -230,7 +276,11 @@ def generate_from_connection(
         if not tables_metadata:
             raise HTTPException(
                 status_code=400,
-                detail="No tables with schema found in the selected paths",
+                detail=(
+                    "No tables with schema found in the selected paths. "
+                    "Select specific tables (not only catalogs/schemas), "
+                    "and ensure you have permission to read their metadata."
+                ),
             )
 
         details["resolved_tables"] = len(tables_metadata)
@@ -241,8 +291,8 @@ def generate_from_connection(
             "includeInheritance": body.include_inheritance,
         }
 
-        connection = conn_mgr.get_connection(UUID(body.connection_id))
-        conn_name = connection.name if connection else body.connection_id
+        connection = conn_mgr.get_connection(connection_uuid)
+        conn_name = getattr(connection, "name", None) or body.connection_id
 
         run_id = manager.start_run(
             db=db,
@@ -261,10 +311,12 @@ def generate_from_connection(
         details["run_id"] = run_id
         return StartRunResponse(run_id=run_id, status=GenerationRunStatus.PENDING)
 
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
     except HTTPException:
         raise
+    except ValueError as e:
+        if "Concurrent run limit" in str(e):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.exception("Failed to start ontology generation from connection")
         details["exception"] = {"type": type(e).__name__, "message": str(e)}
@@ -273,9 +325,10 @@ def generate_from_connection(
             detail=f"Failed to start generation: {e}",
         )
     finally:
-        audit_manager.log_action(
+        _safe_audit_log(
+            audit_manager,
             db=db,
-            username=current_user.username,
+            username=getattr(current_user, "username", None) or "unknown",
             ip_address=request.client.host if request.client else None,
             feature=FEATURE_ID,
             action="START_ONTOLOGY_GENERATION_FROM_CONNECTION",
@@ -462,9 +515,10 @@ def save_to_collection(
             detail=f"Failed to save to collection: {e}",
         )
     finally:
-        audit_manager.log_action(
+        _safe_audit_log(
+            audit_manager,
             db=db,
-            username=current_user.username,
+            username=getattr(current_user, "username", None) or "unknown",
             ip_address=request.client.host if request.client else None,
             feature=FEATURE_ID,
             action="SAVE_ONTOLOGY_TO_COLLECTION",

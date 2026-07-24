@@ -143,9 +143,11 @@ class ErrorHandlingMiddleware(BaseHTTPMiddleware):
              raise http_exc
         except Exception as e:
             logger.error(f"Unhandled error processing request {request.method} {request.url.path}: {e!s}", exc_info=True)
-            # Return a generic 500 response for unhandled exceptions
-            return Response(
-                content="Internal Server Error",
+            # Prefer JSON so the frontend can surface a useful message (useApi
+            # falls back to statusText/"Internal Server Error" for plain text).
+            return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                media_type="text/plain"
+                content={
+                    "detail": f"Internal Server Error: {type(e).__name__}: {e}",
+                },
             )

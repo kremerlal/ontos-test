@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rdflib import OWL, RDF, RDFS, ConjunctiveGraph, Graph, Literal, URIRef
+from rdflib import OWL, RDF, RDFS, XSD, ConjunctiveGraph, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import SKOS
 
 from src.common.logging import get_logger
 from src.common.uc_native.semantic import UcNativeSemanticStore
 from src.models.ontology import OntologyConcept, SemanticModel as SemanticModelOntology
 from src.models.semantic_models import SemanticModel as SemanticModelApi
+from src.owl.owl_parser import clean_truncated_turtle
 
 logger = get_logger(__name__)
+
+ONTOS = Namespace("http://ontos.app/ontology#")
+META_CONTEXT = "urn:meta:sources"
 
 _TAXONOMY_CONTEXT = {
     "ontos-ontology.ttl": "urn:taxonomy:ontos-ontology",
@@ -38,6 +44,26 @@ def _extract_source_context(context_name: str) -> Optional[str]:
     ):
         if context_name.startswith(prefix):
             return context_name[len(prefix) :]
+    return None
+
+
+def _sanitize_context_name(name: str) -> str:
+    sanitized = name.replace(" ", "_")
+    sanitized = re.sub(r"[^a-zA-Z0-9_.\-]", "_", sanitized)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+    return sanitized or "unnamed"
+
+
+def _literal(context, subject: URIRef, predicate) -> Optional[str]:
+    for obj in context.objects(subject, predicate):
+        return str(obj)
+    return None
+
+
+def _uri(context, subject: URIRef, predicate) -> Optional[str]:
+    for obj in context.objects(subject, predicate):
+        if isinstance(obj, URIRef):
+            return str(obj)
     return None
 
 
@@ -331,6 +357,164 @@ class UcNativeSemanticModelsManager:
             descendants=[d for d in descendants if d],
             siblings=[],
         )
+
+    # --- Knowledge collections (save-from-generator + Collections UI) ---
+
+    def get_collections(self) -> List[Dict[str, Any]]:
+        meta = self._graph.get_context(URIRef(META_CONTEXT))
+        collections: List[Dict[str, Any]] = []
+        for subj in meta.subjects(RDF.type, ONTOS.KnowledgeCollection):
+            coll_iri = str(subj)
+            coll_uri = URIRef(coll_iri)
+            is_editable_raw = _literal(meta, coll_uri, ONTOS.isEditable)
+            collections.append(
+                {
+                    "iri": coll_iri,
+                    "label": _literal(meta, coll_uri, RDFS.label) or coll_iri.split(":")[-1],
+                    "description": _literal(meta, coll_uri, RDFS.comment),
+                    "collection_type": _literal(meta, coll_uri, ONTOS.collectionType) or "glossary",
+                    "scope_level": _literal(meta, coll_uri, ONTOS.scopeLevel) or "enterprise",
+                    "source_type": _literal(meta, coll_uri, ONTOS.sourceType) or "custom",
+                    "source_url": _literal(meta, coll_uri, ONTOS.sourceUrl),
+                    "parent_collection_iri": _uri(meta, coll_uri, ONTOS.parentCollection),
+                    "is_editable": (is_editable_raw or "").lower() in ("true", "1"),
+                    "status": _literal(meta, coll_uri, ONTOS.status) or "active",
+                    "created_at": _literal(meta, coll_uri, ONTOS.createdAt),
+                    "created_by": _uri(meta, coll_uri, ONTOS.createdBy),
+                    "concept_count": len(self._graph.get_context(URIRef(coll_iri))),
+                }
+            )
+        collections.sort(key=lambda c: (c.get("label") or "").lower())
+        return collections
+
+    def get_collection(self, collection_iri: str) -> Optional[Dict[str, Any]]:
+        for coll in self.get_collections():
+            if coll["iri"] == collection_iri:
+                return coll
+        return None
+
+    def create_collection(
+        self,
+        label: str,
+        collection_type: str = "glossary",
+        scope_level: str = "enterprise",
+        description: Optional[str] = None,
+        parent_collection_iri: Optional[str] = None,
+        is_editable: bool = True,
+        created_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a KnowledgeCollection in the in-memory graph and persist triples to Delta."""
+        sanitized = _sanitize_context_name(label.lower().replace(" ", "-"))
+        prefix = (
+            "urn:glossary:"
+            if collection_type == "glossary"
+            else "urn:taxonomy:"
+            if collection_type == "taxonomy"
+            else "urn:ontology:"
+        )
+        collection_iri = f"{prefix}{sanitized}"
+        if self.get_collection(collection_iri):
+            raise ValueError(f"Collection already exists: {collection_iri}")
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        meta = self._graph.get_context(URIRef(META_CONTEXT))
+        coll_uri = URIRef(collection_iri)
+        meta.add((coll_uri, RDF.type, ONTOS.KnowledgeCollection))
+        meta.add((coll_uri, RDFS.label, Literal(label)))
+        meta.add((coll_uri, ONTOS.collectionType, Literal(collection_type)))
+        meta.add((coll_uri, ONTOS.scopeLevel, Literal(scope_level)))
+        meta.add((coll_uri, ONTOS.sourceType, Literal("custom")))
+        meta.add((coll_uri, ONTOS.isEditable, Literal(str(is_editable).lower())))
+        meta.add((coll_uri, ONTOS.status, Literal("active")))
+        meta.add((coll_uri, ONTOS.createdAt, Literal(now, datatype=XSD.dateTime)))
+        if description:
+            meta.add((coll_uri, RDFS.comment, Literal(description)))
+        if parent_collection_iri:
+            meta.add((coll_uri, ONTOS.parentCollection, URIRef(parent_collection_iri)))
+        if created_by:
+            user_uri = created_by if created_by.startswith("urn:") else f"urn:user:{created_by}"
+            meta.add((coll_uri, ONTOS.createdBy, URIRef(user_uri)))
+
+        # Ensure an empty content context exists for imports.
+        self._graph.get_context(URIRef(collection_iri))
+
+        persist_rows = [
+            {
+                "subject": collection_iri,
+                "predicate": str(pred),
+                "object": str(obj),
+                "context": META_CONTEXT,
+            }
+            for _, pred, obj in meta.triples((coll_uri, None, None))
+        ]
+        try:
+            self._semantic.merge_triples(persist_rows)
+        except Exception as exc:
+            logger.warning("UC-native collection metadata Delta persist failed: %s", exc)
+
+        created = self.get_collection(collection_iri)
+        if not created:
+            raise RuntimeError(f"Failed to create collection: {collection_iri}")
+        return created
+
+    def import_rdf_to_collection(
+        self,
+        collection_iri: str,
+        content: str,
+        format: str = "turtle",
+        imported_by: Optional[str] = None,
+    ) -> int:
+        """Import RDF into a collection context (memory + Delta + Volume file)."""
+        collection = self.get_collection(collection_iri)
+        if not collection:
+            raise ValueError(f"Collection not found: {collection_iri}")
+        if not collection.get("is_editable"):
+            raise ValueError(f"Collection is not editable: {collection_iri}")
+
+        rdf_format = "turtle" if format.lower() in ("ttl", "turtle") else "xml"
+        payload = clean_truncated_turtle(content) if rdf_format == "turtle" else content
+        temp_graph = Graph()
+        try:
+            temp_graph.parse(data=payload, format=rdf_format)
+        except Exception as exc:
+            raise ValueError(f"Invalid {rdf_format} content: {exc}") from exc
+
+        coll_context = self._graph.get_context(URIRef(collection_iri))
+        for triple in temp_graph:
+            coll_context.add(triple)
+
+        persist_rows = [
+            {
+                "subject": str(s),
+                "predicate": str(p),
+                "object": str(o),
+                "context": collection_iri,
+            }
+            for s, p, o in temp_graph
+        ]
+        try:
+            if persist_rows:
+                self._semantic.merge_triples(persist_rows)
+        except Exception as exc:
+            logger.warning(
+                "UC-native import Delta persist failed for %s: %s", collection_iri, exc
+            )
+
+        # Also stash the raw Turtle on the Volume for reload/export.
+        try:
+            suffix = collection_iri.split(":")[-1]
+            filename = f"{suffix}.ttl" if rdf_format == "turtle" else f"{suffix}.rdf"
+            self.save_ontology_bytes(filename, payload.encode("utf-8"))
+        except Exception as exc:
+            logger.warning("UC-native collection volume save failed: %s", exc)
+
+        logger.info(
+            "Imported %s triples into UC-native collection %s (by=%s)",
+            len(persist_rows),
+            collection_iri,
+            imported_by,
+        )
+        return len(persist_rows)
 
     def list_models(self, db=None, **_) -> List[Dict[str, Any]]:
         return self._semantic.search_triples("", limit=200)

@@ -117,7 +117,13 @@ class AuditManager:
         details: Optional[Dict[str, Any]] = None
     ):
         """Logs an action synchronously using an INDEPENDENT DB session with auto-commit."""
-        session_factory = get_session_factory()
+        # get_session_factory() raises when Postgres was never initialized (uc_native).
+        # Treat that as "no DB" so volume/file audit still works.
+        try:
+            session_factory = get_session_factory()
+        except RuntimeError:
+            session_factory = None
+
         log_entry_data = {
             "username": username,
             "ip_address": ip_address,
@@ -150,7 +156,10 @@ class AuditManager:
         details: Optional[Dict[str, Any]] = None
     ):
         """Logs an action in the background using an independent DB session."""
-        session_factory = get_session_factory()
+        try:
+            session_factory = get_session_factory()
+        except RuntimeError:
+            session_factory = None
         if not session_factory:
             main_logger = get_logger(__name__)
             main_logger.error("Cannot log audit action in background: DB session factory not available.")

@@ -32,4 +32,6 @@ env:
     value: "/Volumes/${workspace.env.DATABRICKS_CATALOG}/${workspace.env.DATABRICKS_SCHEMA}/${workspace.env.DATABRICKS_VOLUME}/audit_logs"
 
   - name: "LLM_ENABLED"
-    value: "False"
+    value: "True"
+  - name: "LLM_ENDPOINT"
+    valueFrom: "serving-endpoint"

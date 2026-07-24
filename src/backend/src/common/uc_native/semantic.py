@@ -33,21 +33,25 @@ class UcNativeSemanticStore:
         return path
 
     def merge_triples(self, triples: List[Dict[str, str]]) -> int:
-        count = 0
-        for triple in triples:
-            triple_id = str(uuid.uuid4())
-            self._store.merge_row(
-                "rdf_triples",
-                {
-                    "id": triple_id,
-                    "subject": triple.get("subject", ""),
-                    "predicate": triple.get("predicate", ""),
-                    "object": triple.get("object", ""),
-                    "context": triple.get("context", ""),
-                },
-            )
-            count += 1
-        return count
+        if not triples:
+            return 0
+        rows = [
+            {
+                "id": str(uuid.uuid4()),
+                "subject": triple.get("subject", ""),
+                "predicate": triple.get("predicate", ""),
+                "object": triple.get("object", ""),
+                "context": triple.get("context", ""),
+            }
+            for triple in triples
+        ]
+        # Prefer bulk insert for generator/import workloads (hundreds of triples).
+        if hasattr(self._store, "insert_rows"):
+            self._store.insert_rows("rdf_triples", rows, chunk_size=50)
+            return len(rows)
+        for row in rows:
+            self._store.merge_row("rdf_triples", row)
+        return len(rows)
 
     def search_triples(self, prefix: str, *, limit: int = 100) -> List[Dict[str, Any]]:
         safe = prefix.replace("'", "''").replace("%", "\\%")

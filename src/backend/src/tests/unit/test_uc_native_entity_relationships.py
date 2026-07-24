@@ -150,6 +150,54 @@ def test_uc_native_semantic_manager_loads_ontology_graph():
     assert details.label
 
 
+def test_uc_native_semantic_manager_create_and_import_collection(tmp_path):
+    from pathlib import Path
+    from src.common.uc_native.semantic_manager import UcNativeSemanticModelsManager
+
+    saved = {}
+
+    class _Semantic:
+        def search_triples(self, *a, **k):
+            return []
+
+        def save_ontology_file(self, filename, content):
+            saved["file"] = (filename, content)
+            return f"/vol/{filename}"
+
+        def merge_triples(self, triples):
+            saved.setdefault("triples", []).extend(triples)
+            return len(triples)
+
+        def append_job_result(self, *a, **k):
+            return ""
+
+    data_dir = Path(__file__).resolve().parents[2] / "data"
+    mgr = UcNativeSemanticModelsManager(_Semantic(), data_dir=data_dir)
+    coll = mgr.create_collection(
+        label="Generated Demo Ontology",
+        collection_type="ontology",
+        description="from generator",
+        created_by="tester@example.com",
+    )
+    assert coll["iri"].startswith("urn:ontology:")
+    assert coll["is_editable"] is True
+    assert mgr.get_collection(coll["iri"]) is not None
+
+    turtle = """
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix : <http://example.org/onto#> .
+:Customer a owl:Class ;
+    rdfs:label "Customer" .
+"""
+    count = mgr.import_rdf_to_collection(coll["iri"], turtle, format="turtle", imported_by="tester")
+    assert count >= 1
+    assert saved.get("triples")
+    assert saved.get("file")
+    refreshed = mgr.get_collection(coll["iri"])
+    assert refreshed["concept_count"] >= 1
+
+
 def test_ontology_generator_memory_runs_without_postgres():
     from src.common.config import Settings
     from src.controller.ontology_generator_manager import OntologyGeneratorManager

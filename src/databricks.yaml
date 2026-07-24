@@ -6,6 +6,9 @@ variables:
     description: "ID of the SQL warehouse to use"
     lookup:
       warehouse: "Serverless Starter Warehouse"
+  llm_endpoint_name:
+    description: "Model Serving endpoint name for Ontology Generator / Ask Ontos"
+    default: "databricks-meta-llama-3-3-70b-instruct"
   catalog_name:
     description: "Name of the catalog to use"
     default: "classic_stable_kremer_catalog"
@@ -43,12 +46,28 @@ resources:
       description: "Ontos"
       source_code_path: "."
       config: ${var.app_config}
+      # Keep OBO scopes in the bundle so deploys don't wipe manifest scopes.
+      # Model Serving still prefers the app SP (see llm_client.py).
+      user_api_scopes:
+        - "sql"
+        - "serving.serving-endpoints"
+        - "files.files"
+        - "dashboards.genie"
+        - "catalog.connections"
+        - "catalog.catalogs:read"
+        - "catalog.schemas:read"
+        - "catalog.tables:read"
       resources:
         - name: "sql-warehouse"
           description: "SQL warehouse for the app"
           sql_warehouse:
             id: ${var.sql_warehouse_id}
             permission: "CAN_USE"
+        - name: "serving-endpoint"
+          description: "LLM serving endpoint for Ontology Generator / Ask Ontos"
+          serving_endpoint:
+            name: ${var.llm_endpoint_name}
+            permission: "CAN_QUERY"
       permissions:
         - user_name: "*"
           level: "CAN_USE"
@@ -108,4 +127,6 @@ targets:
           - name: "APP_AUDIT_LOG_DIR"
             value: "/Volumes/${var.catalog_name}/${var.schema_name}/${var.volume_name}/audit_logs"
           - name: "LLM_ENABLED"
-            value: "False"
+            value: "True"
+          - name: "LLM_ENDPOINT"
+            value_from: "serving-endpoint"
