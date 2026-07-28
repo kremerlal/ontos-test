@@ -12,24 +12,30 @@ env:
   - name: "APP_UC_MIRROR_ENABLED"
     value: "false"
   - name: "APP_UC_APP_SCHEMA"
-    value: "ontos_test"
+    value: "app_ontos"
 
   - name: "PYTHONPATH"
     value: "./backend:${PYTHONPATH}"
   - name: "PYTHONUNBUFFERED"
     value: "1"
   - name: "FRONTEND_STATIC_DIR"
-    value: "./static"
+    value: "./deploy_assets"
 
   - name: "DATABRICKS_WAREHOUSE_ID"
     valueFrom: "sql-warehouse"
+  - name: "DATABRICKS_CATALOG"
+    value: "classic_stable_kremer_catalog"
+  - name: "DATABRICKS_SCHEMA"
+    value: "ontos_test"
+  # Resolves to /Volumes/<catalog>/<schema>/<volume>; requires the "volume"
+  # resource declared on the app (see databricks.yaml).
   - name: "DATABRICKS_VOLUME"
     valueFrom: "volume"
 
   - name: "APP_ADMIN_DEFAULT_GROUPS"
     value: '["admins", "users"]'
   - name: "APP_AUDIT_LOG_DIR"
-    value: "/Volumes/${workspace.env.DATABRICKS_CATALOG}/${workspace.env.DATABRICKS_SCHEMA}/${workspace.env.DATABRICKS_VOLUME}/audit_logs"
+    value: "/Volumes/classic_stable_kremer_catalog/ontos_test/app_files/audit_logs"
 
   - name: "LLM_ENABLED"
     value: "True"

@@ -68,6 +68,12 @@ resources:
           serving_endpoint:
             name: ${var.llm_endpoint_name}
             permission: "CAN_QUERY"
+        - name: "volume"
+          description: "Volume for the app to store files and audit logs"
+          uc_securable:
+            securable_type: "VOLUME"
+            securable_full_name: "${var.catalog_name}.${var.schema_name}.${var.volume_name}"
+            permission: "WRITE_VOLUME"
       permissions:
         - user_name: "*"
           level: "CAN_USE"

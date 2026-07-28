@@ -27,6 +27,23 @@ logger = get_logger(__name__)
 SHARED_ENTITY_ID = "__shared__"
 
 
+def _resolve_volume_parts(settings: Settings) -> Tuple[str, str, str]:
+    """Return (catalog, schema, volume) for the configured app volume.
+
+    Databricks Apps injects DATABRICKS_VOLUME as a full ``/Volumes/<catalog>/<schema>/<volume>``
+    path when it comes from a volume app resource, while local config sets the bare volume name.
+    """
+    configured = (settings.DATABRICKS_VOLUME or "").strip().rstrip("/")
+    if not configured:
+        raise ValueError("DATABRICKS_VOLUME is required to store uploaded files")
+    if configured.startswith("/Volumes/"):
+        parts = configured[len("/Volumes/"):].split("/")
+        if len(parts) < 3 or not all(parts[:3]):
+            raise ValueError(f"DATABRICKS_VOLUME is not a valid volume path: {configured}")
+        return parts[0], parts[1], parts[2]
+    return settings.DATABRICKS_CATALOG, settings.DATABRICKS_SCHEMA, configured
+
+
 class MetadataManager:
     def __init__(
         self,
@@ -67,10 +84,11 @@ class MetadataManager:
         Raises:
             Exception: If volume creation or access fails
         """
+        catalog, schema, volume = _resolve_volume_parts(settings)
         # Unity Catalog volume name (catalog.schema.volume)
-        volume_name = f"{settings.DATABRICKS_CATALOG}.{settings.DATABRICKS_SCHEMA}.{settings.DATABRICKS_VOLUME}"
+        volume_name = f"{catalog}.{schema}.{volume}"
         # Filesystem mount path for the volume
-        volume_fs_base = f"/Volumes/{settings.DATABRICKS_CATALOG}/{settings.DATABRICKS_SCHEMA}/{settings.DATABRICKS_VOLUME}"
+        volume_fs_base = f"/Volumes/{catalog}/{schema}/{volume}"
         
         try:
             try:
@@ -80,9 +98,9 @@ class MetadataManager:
             except Exception as e:
                 logger.info(f"Creating volume {volume_name}")
                 ws.volumes.create(
-                    catalog_name=settings.DATABRICKS_CATALOG,
-                    schema_name=settings.DATABRICKS_SCHEMA,
-                    name=settings.DATABRICKS_VOLUME,
+                    catalog_name=catalog,
+                    schema_name=schema,
+                    name=volume,
                     volume_type=VolumeType.MANAGED,
                 )
                 logger.info(f"Successfully created volume {volume_name}")

@@ -106,7 +106,9 @@ logger.info(f"Debug mode: {settings.DEBUG}")
 # Define paths earlier for use in startup
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
-STATIC_ASSETS_PATH = BASE_DIR.parent / "static"
+STATIC_ASSETS_PATH = BASE_DIR.parent.parent / "deploy_assets"
+if not STATIC_ASSETS_PATH.is_dir():
+    STATIC_ASSETS_PATH = BASE_DIR.parent / "static"
 
 # --- Dependency Providers (Defined globally or before app) ---
 

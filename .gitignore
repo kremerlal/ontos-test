@@ -15,6 +15,7 @@ coverage.xml
 htmlcov/
 **/htmlcov/
 static/
+deploy_assets/
 
 # misc
 .DS_Store
