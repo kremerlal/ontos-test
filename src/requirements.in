@@ -9,3 +9,12 @@ reportlab>=5.0.0
 google-cloud-bigquery>=3.25.0
 openpyxl>=3.1.0
 fpdf2>=2.8.0
+
+# Databricks Apps (pip) preinstalls outdated dash/gradio/streamlit that conflict
+# with our pinned stack (flask 3.1+, pillow 12, protobuf 6, etc.). Ontos does
+# not use these frameworks; listing newer versions overrides the preinstalls so
+# pip's dependency resolver stops failing the Apps build with conflict errors.
+# See: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/dependencies
+dash>=3.0.0
+gradio>=5.0.0
+streamlit>=1.45.0
