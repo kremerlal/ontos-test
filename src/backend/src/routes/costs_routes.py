@@ -19,8 +19,14 @@ router = APIRouter(prefix="/api", tags=["Costs"])
 FEATURE_ID = "data-domains"  # align with metadata until dedicated feature is added
 
 
-def get_costs_manager() -> CostsManager:
-    return CostsManager()
+def get_costs_manager(request: Request) -> CostsManager:
+    """Use the manager wired at startup, falling back to the Postgres one.
+
+    uc_native puts a Delta-backed costs manager on app.state; instantiating
+    CostsManager() unconditionally would hand every route a Postgres
+    repository with no OLTP session behind it.
+    """
+    return getattr(request.app.state, "costs_manager", None) or CostsManager()
 
 
 @router.post("/entities/{entity_type}/{entity_id}/cost-items", response_model=CostItem, status_code=status.HTTP_201_CREATED)

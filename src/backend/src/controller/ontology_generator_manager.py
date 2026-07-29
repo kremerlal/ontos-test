@@ -59,7 +59,9 @@ class _MemoryRun:
 
 
 def _is_noop_db(db) -> bool:
-    return db is None or type(db).__name__ == "_NoOpDbSession"
+    from src.common.database import is_noop_session
+
+    return is_noop_session(db)
 
 
 # =====================================================================

@@ -13,7 +13,7 @@ from src.models.projects import (
     ProjectAccessRequest,
     ProjectAccessRequestResponse
 )
-from src.controller.projects_manager import projects_manager
+from src.common.manager_dependencies import get_projects_manager
 from src.common.database import get_db
 from sqlalchemy.orm import Session
 from src.common.authorization import PermissionChecker, is_user_admin
@@ -37,11 +37,6 @@ router = APIRouter(prefix="/api", tags=["Projects"])
 
 # Feature ID constant
 PROJECTS_FEATURE_ID = "projects"
-
-# Project dependency
-def get_projects_manager():
-    return projects_manager
-
 
 # Project Routes
 @router.post(

@@ -9,6 +9,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from src.common.database import is_noop_session
 from src.common.logging import get_logger
 from src.controller.entity_dict_builder import (
     build_data_product_dict,
@@ -49,6 +50,17 @@ class MaturityEvaluator:
         if not builder:
             logger.warning(f"No entity dict builder for type: {entity_type}")
             return None
+
+        if is_noop_session(db):
+            # Storage modes without Postgres have no maturity levels to evaluate
+            # against, and the entity dict builder is Postgres-shaped. Report
+            # "not assessed" rather than failing the whole request.
+            return MaturityReport(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                evaluated_at=datetime.now(timezone.utc),
+                evaluated_by=evaluated_by,
+            )
 
         entity_dict = builder(db, entity_id)
         if entity_dict is None:

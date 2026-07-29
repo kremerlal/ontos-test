@@ -7,11 +7,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from rdflib import OWL, RDF, RDFS, XSD, ConjunctiveGraph, Graph, Literal, Namespace, URIRef
+from rdflib import (
+    OWL,
+    RDF,
+    RDFS,
+    XSD,
+    BNode,
+    ConjunctiveGraph,
+    Graph,
+    Literal,
+    Namespace,
+    URIRef,
+)
 from rdflib.namespace import SKOS
 
 from src.common.logging import get_logger
-from src.common.uc_native.semantic import UcNativeSemanticStore
+from src.common.uc_native.semantic import UcNativeSemanticStore, looks_like_iri
 from src.models.ontology import OntologyConcept, SemanticModel as SemanticModelOntology
 from src.models.semantic_models import SemanticModel as SemanticModelApi
 from src.owl.owl_parser import clean_truncated_turtle
@@ -67,6 +78,54 @@ def _uri(context, subject: URIRef, predicate) -> Optional[str]:
     return None
 
 
+def _term_to_str(term) -> str:
+    """Serialise a term, keeping blank nodes distinguishable from IRIs."""
+    return f"_:{term}" if isinstance(term, BNode) else str(term)
+
+
+def _str_to_node(value: str):
+    return BNode(value[2:]) if value.startswith("_:") else URIRef(value)
+
+
+def _triple_row(subject, predicate, obj, context: str) -> Dict[str, Any]:
+    """Shape one rdflib triple into an ``rdf_triples`` row."""
+    language = ""
+    datatype = ""
+    if isinstance(obj, Literal):
+        language = obj.language or ""
+        datatype = str(obj.datatype) if obj.datatype else ""
+    return {
+        "subject": _term_to_str(subject),
+        "predicate": str(predicate),
+        "object": _term_to_str(obj),
+        "object_is_uri": not isinstance(obj, Literal),
+        "object_language": language,
+        "object_datatype": datatype,
+        "context": context,
+    }
+
+
+def _row_to_object(row: Dict[str, Any]):
+    """Rebuild an object term from a stored row, tolerating pre-typing rows."""
+    raw = row.get("object")
+    value = "" if raw is None else str(raw)
+    is_uri = row.get("object_is_uri")
+    if is_uri is None:
+        # Rows written before object typing existed carry no term kind.
+        is_uri = looks_like_iri(value)
+    elif isinstance(is_uri, str):
+        is_uri = is_uri.strip().lower() in ("true", "t", "1")
+    if is_uri:
+        return _str_to_node(value)
+    language = (row.get("object_language") or "").strip()
+    if language:
+        return Literal(value, lang=language)
+    datatype = (row.get("object_datatype") or "").strip()
+    if datatype:
+        return Literal(value, datatype=URIRef(datatype))
+    return Literal(value)
+
+
 class UcNativeSemanticModelsManager:
     """UC-native semantic manager with an in-memory RDF graph for ontology features.
 
@@ -86,6 +145,54 @@ class UcNativeSemanticModelsManager:
         self._data_dir = data_dir or Path(__file__).resolve().parents[2] / "data"
         taxonomy_dir = self._data_dir / "taxonomies"
         self._load_bundled_taxonomies(taxonomy_dir)
+        self._hydrate_from_delta()
+
+    def rebuild_graph_from_enabled(self) -> None:
+        """Rebuild the graph from bundled taxonomies plus persisted Delta triples."""
+        self._graph = ConjunctiveGraph()
+        self._load_bundled_taxonomies(self._data_dir / "taxonomies")
+        self._hydrate_from_delta()
+
+    def _hydrate_from_delta(self) -> None:
+        """Load user-created collections and imports back out of ``rdf_triples``.
+
+        The Delta table is the system of record in uc_native; this graph is only a
+        process-local cache. Without this read-back, anything a user created is
+        invisible after a redeploy or container restart.
+        """
+        try:
+            rows = self._semantic.load_all_triples()
+        except Exception as exc:
+            logger.warning(
+                "UC-native graph rehydration from rdf_triples failed: %s", exc, exc_info=True
+            )
+            return
+
+        loaded = 0
+        contexts: set[str] = set()
+        for row in rows:
+            context_name = (row.get("context") or "").strip()
+            subject = (row.get("subject") or "").strip()
+            predicate = (row.get("predicate") or "").strip()
+            if not context_name or not subject or not predicate:
+                continue
+            try:
+                context = self._graph.get_context(URIRef(context_name))
+                context.add(
+                    (_str_to_node(subject), URIRef(predicate), _row_to_object(row))
+                )
+            except Exception as exc:
+                logger.debug("Skipping unusable rdf_triples row %s: %s", row.get("id"), exc)
+                continue
+            contexts.add(context_name)
+            loaded += 1
+
+        if loaded:
+            logger.info(
+                "Rehydrated %s triples from rdf_triples across %s contexts",
+                loaded,
+                len(contexts),
+            )
 
     def _load_bundled_taxonomies(self, taxonomy_dir: Path) -> None:
         if not taxonomy_dir.is_dir():
@@ -439,12 +546,7 @@ class UcNativeSemanticModelsManager:
         self._graph.get_context(URIRef(collection_iri))
 
         persist_rows = [
-            {
-                "subject": collection_iri,
-                "predicate": str(pred),
-                "object": str(obj),
-                "context": META_CONTEXT,
-            }
+            _triple_row(coll_uri, pred, obj, META_CONTEXT)
             for _, pred, obj in meta.triples((coll_uri, None, None))
         ]
         try:
@@ -484,13 +586,7 @@ class UcNativeSemanticModelsManager:
             coll_context.add(triple)
 
         persist_rows = [
-            {
-                "subject": str(s),
-                "predicate": str(p),
-                "object": str(o),
-                "context": collection_iri,
-            }
-            for s, p, o in temp_graph
+            _triple_row(s, p, o, collection_iri) for s, p, o in temp_graph
         ]
         try:
             if persist_rows:
@@ -500,11 +596,13 @@ class UcNativeSemanticModelsManager:
                 "UC-native import Delta persist failed for %s: %s", collection_iri, exc
             )
 
-        # Also stash the raw Turtle on the Volume for reload/export.
+        # Also stash the raw Turtle on the Volume for export. This writes the file
+        # only — save_ontology_bytes would additionally mirror the content into a
+        # urn:semantic-model: context and duplicate the collection as a taxonomy.
         try:
             suffix = collection_iri.split(":")[-1]
             filename = f"{suffix}.ttl" if rdf_format == "turtle" else f"{suffix}.rdf"
-            self.save_ontology_bytes(filename, payload.encode("utf-8"))
+            self._semantic.save_ontology_file(filename, payload.encode("utf-8"))
         except Exception as exc:
             logger.warning("UC-native collection volume save failed: %s", exc)
 

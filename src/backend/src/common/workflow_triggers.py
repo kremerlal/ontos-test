@@ -999,6 +999,19 @@ def fire_trigger_safe(
         blocking: Whether to execute synchronously
     """
     try:
+        from src.common.database import is_noop_session
+
+        # Workflow trigger registry is Postgres-backed today. In uc_native mode
+        # the request session is a NoOp stand-in — skip rather than query it.
+        if is_noop_session(db):
+            logger.debug(
+                "Skipping %s trigger for %s %s in non-OLTP storage mode",
+                method,
+                entity_type.value,
+                entity_id,
+            )
+            return
+
         registry = get_trigger_registry(db)
         kwargs: Dict[str, Any] = {
             "entity_type": entity_type,

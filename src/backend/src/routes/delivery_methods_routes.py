@@ -4,9 +4,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 
 from src.models.delivery_methods import DeliveryMethodCreate, DeliveryMethodUpdate, DeliveryMethodRead
-from src.controller.delivery_methods_manager import delivery_methods_manager
 from src.common.authorization import PermissionChecker
 from src.common.features import FeatureAccessLevel
+from src.common.manager_dependencies import get_delivery_methods_manager
 from src.common.dependencies import (
     DBSessionDep,
     AuditManagerDep,
@@ -24,10 +24,6 @@ FEATURE_ID = "delivery-methods"
 # feature (any product author can list/get) rather than the admin-managed
 # delivery-methods feature. Writes stay gated by delivery-methods:READ_WRITE.
 READ_FEATURE_ID = "data-products"
-
-
-def get_delivery_methods_manager():
-    return delivery_methods_manager
 
 
 @router.post(

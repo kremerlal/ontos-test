@@ -43,7 +43,9 @@ def _sql_literal(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return str(value)
-    escaped = str(value).replace("'", "''")
+    # Spark SQL string literals process backslash escapes, so a backslash must be
+    # doubled or JSON payloads (\n, \", \\) are silently corrupted on write.
+    escaped = str(value).replace("\\", "\\\\").replace("'", "''")
     return f"'{escaped}'"
 
 
@@ -83,7 +85,7 @@ class DeltaStore:
                 raise ValueError(f"Unknown UC app table: {table_name}")
             fqn = f"{catalog}.{schema}.{table_name}"
             try:
-                self._ws.tables.get(fqn)
+                table_info = self._ws.tables.get(fqn)
             except Exception:
                 columns: List[ColumnSpec] = APP_TABLES[table_name]
                 # Catalog TablesAPI.create only supports EXTERNAL tables and
@@ -97,8 +99,38 @@ class DeltaStore:
                     f"COMMENT 'Ontos uc_native: {sanitize_uc_identifier(table_name)}'"
                 )
                 logger.info("Created UC app table %s", fqn)
+            else:
+                self._add_missing_columns(fqn, table_name, table_info)
             created.append(fqn)
         return created
+
+    def _add_missing_columns(self, fqn: str, table_name: str, table_info: Any) -> None:
+        """Widen an already-created table to match its current column spec."""
+        present = {
+            (column.name or "").lower()
+            for column in (getattr(table_info, "columns", None) or [])
+        }
+        if not present:
+            return
+        missing = [
+            column
+            for column in APP_TABLES[table_name]
+            if sanitize_uc_identifier(column[0]).lower() not in present
+        ]
+        if not missing:
+            return
+        col_defs = ", ".join(
+            f"`{sanitize_uc_identifier(c[0])}` {_sql_type(c[1])}" for c in missing
+        )
+        try:
+            self.execute(f"ALTER TABLE {fqn} ADD COLUMNS ({col_defs})")
+            logger.info(
+                "Added columns to UC app table %s: %s",
+                fqn,
+                ", ".join(c[0] for c in missing),
+            )
+        except Exception as exc:
+            logger.warning("Failed adding columns to UC app table %s: %s", fqn, exc)
 
     def execute(self, statement: str) -> None:
         response = self._ws.statement_execution.execute_statement(
@@ -241,5 +273,8 @@ class DeltaStore:
             return raw
         try:
             return json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as exc:
+            # Silently returning {} here once hid a write-side escaping bug that
+            # dropped every field of the affected rows.
+            logger.warning("Unparsable snapshot_json in row %s: %s", row.get("id"), exc)
             return {}

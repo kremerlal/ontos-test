@@ -15,6 +15,13 @@ from src.common.uc_native.delta_store import DeltaStore
 
 logger = get_logger(__name__)
 
+_IRI_SCHEMES = ("http://", "https://", "urn:", "mailto:", "file:", "_:")
+
+
+def looks_like_iri(value: str) -> bool:
+    """Best-effort term-kind guess for rows written before object typing existed."""
+    return bool(value) and value.startswith(_IRI_SCHEMES)
+
 
 class UcNativeSemanticStore:
     def __init__(
@@ -32,19 +39,26 @@ class UcNativeSemanticStore:
         self._ws.files.upload(path, content, overwrite=True)
         return path
 
-    def merge_triples(self, triples: List[Dict[str, str]]) -> int:
+    def merge_triples(self, triples: List[Dict[str, Any]]) -> int:
         if not triples:
             return 0
-        rows = [
-            {
-                "id": str(uuid.uuid4()),
-                "subject": triple.get("subject", ""),
-                "predicate": triple.get("predicate", ""),
-                "object": triple.get("object", ""),
-                "context": triple.get("context", ""),
-            }
-            for triple in triples
-        ]
+        rows = []
+        for triple in triples:
+            obj = triple.get("object", "")
+            rows.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "subject": triple.get("subject", ""),
+                    "predicate": triple.get("predicate", ""),
+                    "object": obj,
+                    "object_is_uri": bool(
+                        triple.get("object_is_uri", looks_like_iri(str(obj)))
+                    ),
+                    "object_language": triple.get("object_language") or "",
+                    "object_datatype": triple.get("object_datatype") or "",
+                    "context": triple.get("context", ""),
+                }
+            )
         # Prefer bulk insert for generator/import workloads (hundreds of triples).
         if hasattr(self._store, "insert_rows"):
             self._store.insert_rows("rdf_triples", rows, chunk_size=50)
@@ -52,6 +66,32 @@ class UcNativeSemanticStore:
         for row in rows:
             self._store.merge_row("rdf_triples", row)
         return len(rows)
+
+    def load_all_triples(
+        self,
+        *,
+        page_size: int = 5000,
+        max_rows: int = 200_000,
+    ) -> List[Dict[str, Any]]:
+        """Read every persisted triple, paging so results survive result-chunk limits."""
+        fqn = self._store.table_fqn("rdf_triples")
+        page = max(1, min(int(page_size), 10_000))
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        while len(rows) < max_rows:
+            batch = self._store.query(
+                f"SELECT * FROM {fqn} ORDER BY id LIMIT {page} OFFSET {offset}"
+            )
+            rows.extend(batch)
+            if len(batch) < page:
+                break
+            offset += page
+        if len(rows) > max_rows:
+            logger.warning(
+                "rdf_triples has more than %s rows; graph rehydration is partial",
+                max_rows,
+            )
+        return rows[:max_rows]
 
     def search_triples(self, prefix: str, *, limit: int = 100) -> List[Dict[str, Any]]:
         safe = prefix.replace("'", "''").replace("%", "\\%")

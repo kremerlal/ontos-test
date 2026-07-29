@@ -996,13 +996,135 @@ def init_db() -> None:
         engine = None # Reset public engine on failure
         raise ConnectionError("Failed to initialize database connection or run migrations.") from e
 
+class NoOpDbSession:
+    """Placeholder session for storage modes that have no Postgres.
+
+    Mimics enough of the SQLAlchemy Session / Query chain that read-only
+    repository helpers (e.g. certification_levels.order_by().all()) return
+    empty results instead of AttributeError 500s.
+    """
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def add(self, *_args, **_kwargs) -> None:
+        return None
+
+    def delete(self, *_args, **_kwargs) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+    def refresh(self, *_args, **_kwargs) -> None:
+        return None
+
+    def execute(self, *_args, **_kwargs):
+        return self
+
+    def scalar(self, *_args, **_kwargs):
+        return None
+
+    def scalars(self, *_args, **_kwargs):
+        return self
+
+    def query(self, *_args, **_kwargs):
+        return self
+
+    def options(self, *_args, **_kwargs):
+        return self
+
+    def join(self, *_args, **_kwargs):
+        return self
+
+    def outerjoin(self, *_args, **_kwargs):
+        return self
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def filter_by(self, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def group_by(self, *_args, **_kwargs):
+        return self
+
+    def distinct(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def offset(self, *_args, **_kwargs):
+        return self
+
+    def first(self):
+        return None
+
+    def one_or_none(self):
+        return None
+
+    def one(self):
+        raise LookupError("No row found for NoOpDbSession.one()")
+
+    def all(self):
+        return []
+
+    def count(self):
+        return 0
+
+    def __iter__(self):
+        return iter([])
+
+
+def is_noop_session(db: Any) -> bool:
+    """True when ``db`` is a stand-in rather than a real SQLAlchemy session.
+
+    Callers use this to skip Postgres-only work in uc_native mode. Matching on
+    the class name as well as the type keeps lightweight test doubles working.
+    """
+    if db is None:
+        return True
+    return isinstance(db, NoOpDbSession) or type(db).__name__ in ("NoOpDbSession", "_NoOpDbSession")
+
+
+def oltp_database_required() -> bool:
+    """True when the active storage mode expects a Postgres/Lakebase session.
+
+    Defaults to True when settings can't be resolved, so a genuine
+    misconfiguration still fails loudly instead of silently degrading to the
+    no-op session.
+    """
+    from src.common.storage_mode import requires_oltp_database, resolve_storage_mode
+
+    try:
+        return requires_oltp_database(resolve_storage_mode(get_settings()))
+    except Exception:
+        return True
+
+
 def get_db():
     global _SessionLocal
     if _SessionLocal is None:
+        if not oltp_database_required():
+            # uc_native / uc_readonly keep their system of record in UC Delta.
+            # The managers ignore the session argument, but routes still call
+            # commit()/rollback() on it, so hand out the no-op stand-in.
+            yield NoOpDbSession()
+            return
         logger.error("Database not initialized. Cannot get session.")
         # Consider raising HTTPException for FastAPI to handle gracefully if this occurs at runtime
         raise RuntimeError("Database session factory is not available. Database might not have been initialized correctly.")
-    
+
     db = _SessionLocal()
     try:
         yield db
@@ -1023,9 +1145,19 @@ def get_db_session():
     Ensures the session is committed on success and rolled back on error,
     and that the session is always closed. If the session factory is not
     initialized yet, it attempts to initialize the database first.
+
+    In non-OLTP modes (``uc_native`` / ``uc_readonly``) yields ``NoOpDbSession``
+    instead of trying to initialize Postgres.
     """
     global _SessionLocal
     if _SessionLocal is None:
+        if not oltp_database_required():
+            session = NoOpDbSession()
+            try:
+                yield session
+            finally:
+                session.close()
+            return
         try:
             init_db()
         except Exception as e:

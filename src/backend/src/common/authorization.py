@@ -11,7 +11,7 @@ from src.common.database import get_db
 # Import dependencies needed for the moved function
 from databricks.sdk.errors import NotFound
 from src.controller.users_manager import UsersManager
-from src.common.config import get_settings, Settings
+from src.common.config import get_settings, parse_group_list, Settings
 # Import from the new dependencies file
 from src.common.manager_dependencies import get_auth_manager, get_users_manager, get_settings_manager
 from src.controller.settings_manager import SettingsManager
@@ -35,24 +35,10 @@ def is_user_admin(user_groups: Optional[List[str]], settings: Settings) -> bool:
     """
     if not user_groups:
         return False
-    
-    try:
-        import json
-        admin_groups_str = settings.APP_ADMIN_DEFAULT_GROUPS or '["admins", "users"]'
-        admin_groups = json.loads(admin_groups_str)
-        
-        # Check if any user group matches any admin group (case-insensitive)
-        user_groups_lower = [g.lower() for g in user_groups]
-        admin_groups_lower = [g.lower() for g in admin_groups]
-        
-        return any(ug in admin_groups_lower for ug in user_groups_lower)
-    except (json.JSONDecodeError, Exception) as e:
-        logger.error("Error parsing APP_ADMIN_DEFAULT_GROUPS: %s", e)
-        # Fallback to simple check
-        return any(
-            group in {"admins", "users"}
-            for group in (g.lower() for g in user_groups)
-        )
+
+    admin_groups = parse_group_list(settings.APP_ADMIN_DEFAULT_GROUPS) or ["admins", "users"]
+    admin_groups_lower = {g.lower() for g in admin_groups}
+    return any(g.lower() in admin_groups_lower for g in user_groups)
 
 
 async def is_user_feature_admin(
@@ -289,22 +275,10 @@ async def get_user_details_from_sdk(
         mock_ip = settings.MOCK_USER_IP or LOCAL_DEV_USER.ip
         groups_source = "default"
         mock_groups = LOCAL_DEV_USER.groups
-        if settings.MOCK_USER_GROUPS:
-            try:
-                # Try JSON first (e.g. '["a","b"]')
-                import json as _json
-                parsed = _json.loads(settings.MOCK_USER_GROUPS)
-                if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
-                    mock_groups = parsed
-                    groups_source = "json"
-                else:
-                    raise ValueError("MOCK_USER_GROUPS JSON must be an array of strings")
-            except Exception:
-                # Fallback to comma-separated string
-                csv = [g.strip() for g in settings.MOCK_USER_GROUPS.split(',') if g.strip()]
-                if csv:
-                    mock_groups = csv
-                    groups_source = "csv"
+        configured_groups = parse_group_list(settings.MOCK_USER_GROUPS)
+        if configured_groups:
+            mock_groups = configured_groups
+            groups_source = "config"
         logger.info(
             f"Local/mock user mode: using overrides(email={mock_email}, username={mock_username}, user={mock_name}, ip={mock_ip}, groups_source={groups_source}, groups={mock_groups})"
         )
@@ -435,21 +409,25 @@ async def get_user_groups(user_email: str, request: Optional[Request] = None) ->
 
     if settings.ENV.upper().startswith("LOCAL") or getattr(settings, "MOCK_USER_DETAILS", False):
         # Return mock groups for local/mock development honoring overrides
-        if settings.MOCK_USER_GROUPS:
-            try:
-                import json as _json
-                parsed = _json.loads(settings.MOCK_USER_GROUPS)
-                if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
-                    return parsed
-            except Exception:
-                csv = [g.strip() for g in settings.MOCK_USER_GROUPS.split(',') if g.strip()]
-                if csv:
-                    return csv
+        configured_groups = parse_group_list(settings.MOCK_USER_GROUPS)
+        if configured_groups:
+            return configured_groups
         return LOCAL_DEV_USER.groups
 
     # In production, you would get groups from the user details
     # For now, returning empty list as fallback
     return []
+
+
+def _member_attr(obj, name: str):
+    """Read ``name`` off a team/member that may be an ORM row or a plain dict.
+
+    uc_native managers return Delta documents (dicts); the Postgres managers
+    return SQLAlchemy models.
+    """
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
 
 
 async def get_user_team_role_overrides(user_identifier: str, user_groups: List[str], request: Request) -> Optional[str]:
@@ -464,8 +442,10 @@ async def get_user_team_role_overrides(user_identifier: str, user_groups: List[s
         # Get database session
         db = next(get_db())
         try:
-            # Get teams where user is a member
-            user_teams = teams_manager.get_teams_for_user(db, user_identifier)
+            # Get teams where user is a member (include group memberships)
+            user_teams = teams_manager.get_teams_for_user(
+                db, user_identifier, user_groups=user_groups
+            )
 
             # Normalize user groups to lowercase for case-insensitive matching
             user_groups_lower = set(g.lower() for g in user_groups)
@@ -473,15 +453,19 @@ async def get_user_team_role_overrides(user_identifier: str, user_groups: List[s
             # Collect all role overrides for this user across teams
             role_overrides = []
             for team in user_teams:
-                for member in team.members:
-                    if member.member_identifier == user_identifier and member.app_role_override:
-                        role_overrides.append(member.app_role_override)
+                for member in _member_attr(team, "members") or []:
+                    identifier = _member_attr(member, "member_identifier")
+                    override = _member_attr(member, "app_role_override")
+                    if identifier == user_identifier and override:
+                        role_overrides.append(override)
 
             # Also check group memberships (case-insensitive)
             for team in user_teams:
-                for member in team.members:
-                    if member.member_identifier.lower() in user_groups_lower and member.app_role_override:
-                        role_overrides.append(member.app_role_override)
+                for member in _member_attr(team, "members") or []:
+                    identifier = _member_attr(member, "member_identifier")
+                    override = _member_attr(member, "app_role_override")
+                    if identifier and identifier.lower() in user_groups_lower and override:
+                        role_overrides.append(override)
 
             if not role_overrides:
                 return None

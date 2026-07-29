@@ -209,6 +209,10 @@ SEMANTIC_TABLES: Dict[str, List[ColumnSpec]] = {
         ("subject", ColumnTypeName.STRING),
         ("predicate", ColumnTypeName.STRING),
         ("object", ColumnTypeName.STRING),
+        # Object term kind, so the in-memory graph can be rebuilt losslessly.
+        ("object_is_uri", ColumnTypeName.BOOLEAN),
+        ("object_language", ColumnTypeName.STRING),
+        ("object_datatype", ColumnTypeName.STRING),
         ("context", ColumnTypeName.STRING),
         ("updated_at", ColumnTypeName.STRING),
     ],

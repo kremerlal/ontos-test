@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from src.common.config import Settings
+from src.common.config import Settings, parse_group_list
 from src.common.features import APP_FEATURES, FeatureAccessLevel
 from src.common.logging import get_logger
 from src.common.uc_native.delta_store import DeltaStore
@@ -171,11 +171,4 @@ class UcNativeRbacStore:
             logger.info("Updated UC native Admin groups: %s", groups)
 
     def _admin_groups(self) -> List[str]:
-        raw = self._settings.APP_ADMIN_DEFAULT_GROUPS or '["admins", "users"]'
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                return [str(g) for g in parsed]
-        except json.JSONDecodeError:
-            pass
-        return ["admins", "users"]
+        return parse_group_list(self._settings.APP_ADMIN_DEFAULT_GROUPS) or ["admins", "users"]

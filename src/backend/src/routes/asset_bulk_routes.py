@@ -5,7 +5,7 @@ Provides endpoints for exporting assets as CSV/XLSX and importing
 assets from uploaded files with preview and validation.
 """
 
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
@@ -30,14 +30,18 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/assets/bulk", tags=["Asset Bulk"])
 FEATURE_ID = "assets"
 
-_bulk_manager: Optional[AssetBulkManager] = None
 
-
-def get_bulk_manager() -> AssetBulkManager:
-    global _bulk_manager
-    if _bulk_manager is None:
-        _bulk_manager = AssetBulkManager()
-    return _bulk_manager
+def get_bulk_manager(request: Request) -> Any:
+    """Prefer the UC-native bulk manager from app.state when present."""
+    manager = getattr(request.app.state, "asset_bulk_manager", None)
+    if manager is not None:
+        return manager
+    # Lakebase / Postgres fallback — construct once per process.
+    cached = getattr(request.app.state, "_postgres_asset_bulk_manager", None)
+    if cached is None:
+        cached = AssetBulkManager()
+        request.app.state._postgres_asset_bulk_manager = cached
+    return cached
 
 
 # ------------------------------------------------------------------
@@ -59,7 +63,7 @@ def export_assets(
     platform: Optional[str] = Query(None),
     domain_id: Optional[str] = Query(None),
     asset_status: Optional[str] = Query(None, alias="status"),
-    manager: AssetBulkManager = Depends(get_bulk_manager),
+    manager=Depends(get_bulk_manager),
 ):
     """Export filtered assets as CSV or XLSX file download. When `ids` is provided, only those assets are exported."""
     success = False
@@ -103,7 +107,7 @@ def export_template(
     db: DBSessionDep,
     asset_type: Optional[str] = Query(None, description="Asset type name for the template"),
     fmt: str = Query("csv", alias="format", description="Template format: csv or xlsx"),
-    manager: AssetBulkManager = Depends(get_bulk_manager),
+    manager=Depends(get_bulk_manager),
 ):
     """Download an empty import template with correct headers and an example row."""
     try:
@@ -132,7 +136,7 @@ def export_template(
 async def preview_import(
     db: DBSessionDep,
     file: UploadFile = File(..., description="CSV or XLSX file to preview"),
-    manager: AssetBulkManager = Depends(get_bulk_manager),
+    manager=Depends(get_bulk_manager),
 ):
     """Upload a file and preview what will be created, updated, or skipped."""
     try:
@@ -156,7 +160,7 @@ async def execute_import(
     audit_manager: AuditManagerDep,
     current_user: AuditCurrentUserDep,
     file: UploadFile = File(..., description="CSV or XLSX file to import"),
-    manager: AssetBulkManager = Depends(get_bulk_manager),
+    manager=Depends(get_bulk_manager),
 ):
     """Upload a file and execute the import, creating/updating assets."""
     success = False

@@ -6,10 +6,11 @@ import json
 from typing import Dict, List, Optional
 
 from src.common.config import Settings
-from src.common.features import FeatureAccessLevel
+from src.common.features import ACCESS_LEVEL_ORDER, FeatureAccessLevel
 from src.common.logging import get_logger
 from src.common.uc_native.delta_store import DeltaStore
 from src.common.uc_native.rbac import UcNativeRbacStore
+from src.db_models.settings import NO_ROLE_SENTINEL
 from src.models.settings import AppRole
 
 logger = get_logger(__name__)
@@ -40,6 +41,69 @@ class UcNativeSettingsManager:
         if not role:
             return {}
         return dict(role.feature_permissions)
+
+    def get_app_role(self, role_id: str) -> Optional[AppRole]:
+        return self._rbac.get_role_by_id(str(role_id))
+
+    def get_app_role_by_name(self, role_name: str) -> Optional[AppRole]:
+        return self._rbac.get_role_by_name(role_name)
+
+    def _roles_for_groups(self, user_groups: List[str]) -> List[AppRole]:
+        groups = set(user_groups)
+        return [
+            role
+            for role in self.list_app_roles()
+            if groups.intersection(set(role.assigned_groups or []))
+        ]
+
+    def get_canonical_role_for_groups(self, user_groups: Optional[List[str]]) -> Optional[AppRole]:
+        """Map the caller's groups to their configured AppRole.
+
+        Mirrors SettingsManager.get_canonical_role_for_groups: an "admin"-ish
+        group name wins first (dev-friendly), otherwise the highest-privilege
+        role whose assigned_groups the caller is in. The Postgres manager's
+        distance-based fallback is omitted — uc_native roles come from the
+        seeded roles YAML, so an unmatched caller genuinely has no role.
+        """
+        if not user_groups:
+            return None
+
+        roles = self.list_app_roles()
+        if any("admin" in group.lower() for group in user_groups):
+            admin = next(
+                (r for r in roles if (r.name or "").strip().lower() == "admin"), None
+            )
+            if admin:
+                return admin
+
+        best_role: Optional[AppRole] = None
+        best_weight = -1
+        for role in self._roles_for_groups(list(user_groups)):
+            weight = sum(
+                ACCESS_LEVEL_ORDER.get(level, 0)
+                for level in (role.feature_permissions or {}).values()
+            )
+            if weight > best_weight:
+                best_weight = weight
+                best_role = role
+        return best_role
+
+    def get_requestable_roles_for_user(
+        self, user_groups: Optional[List[str]] = None
+    ) -> List[AppRole]:
+        """Roles the caller may request, per each role's requestable_by_roles.
+
+        uc_native stores no role hierarchy today, so this is normally empty; it
+        starts returning rows as soon as roles carry requestable_by_roles.
+        """
+        held_role_ids = {str(role.id) for role in self._roles_for_groups(list(user_groups or []))}
+        requesters = held_role_ids or {NO_ROLE_SENTINEL}
+        return [
+            role
+            for role in self.list_app_roles()
+            if str(role.id) not in held_role_ids
+            and requesters.intersection({str(r) for r in (role.requestable_by_roles or [])})
+        ]
 
     def get_applied_role_override_for_user(self, user_email: str) -> Optional[str]:
         stored = self._store.get_setting(f"role_override:{user_email}")

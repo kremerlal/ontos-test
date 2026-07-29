@@ -11,7 +11,7 @@ from src.models.teams import (
     TeamMemberUpdate,
     TeamMemberRead
 )
-from src.controller.teams_manager import teams_manager
+from src.common.manager_dependencies import get_teams_manager
 from src.common.database import get_db
 from sqlalchemy.orm import Session
 from src.common.authorization import PermissionChecker
@@ -33,11 +33,6 @@ router = APIRouter(prefix="/api", tags=["Teams"])
 
 # Feature ID constant
 TEAMS_FEATURE_ID = "teams"
-
-# Team dependency
-def get_teams_manager():
-    return teams_manager
-
 
 # Team Routes
 @router.post(

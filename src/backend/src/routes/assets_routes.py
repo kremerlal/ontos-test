@@ -10,9 +10,9 @@ from src.models.assets import (
     PaginatedAssetSummary,
     DeletePreviewItem, CascadeDeleteRequest, CascadeDeleteResult,
 )
-from src.controller.assets_manager import assets_manager
 from src.common.authorization import PermissionChecker
 from src.common.features import FeatureAccessLevel
+from src.common.manager_dependencies import get_assets_manager
 from src.common.dependencies import (
     DBSessionDep,
     CurrentUserDep,
@@ -27,10 +27,6 @@ logger = get_logger(__name__)
 asset_types_router = APIRouter(prefix="/api/asset-types", tags=["Asset Types"])
 assets_router = APIRouter(prefix="/api/assets", tags=["Assets"])
 FEATURE_ID = "assets"
-
-
-def get_assets_manager():
-    return assets_manager
 
 
 def _get_data_products_manager(request: Request):

@@ -131,7 +131,7 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
     app.state.directory_manager = DirectoryManager()
     app.state.workspace_manager = WorkspaceManager(ws_client=ws_client)
 
-    app.state.data_products_manager = UcNativeDataProductsManager(entities)
+    app.state.data_products_manager = UcNativeDataProductsManager(entities, overlays=overlays)
     app.state.data_contracts_manager = UcNativeDataContractsManager(entities)
     assets_manager = UcNativeAssetsManager(entities, overlays=overlays)
     try:
@@ -142,6 +142,9 @@ def initialize_uc_native(app: FastAPI, settings: Settings) -> None:
         health.setdefault("warnings", []).append(f"Asset type seed failed: {exc}")
         logger.warning("Failed to seed UC-native asset types: %s", exc, exc_info=True)
     app.state.assets_manager = assets_manager
+    from src.common.uc_native.asset_bulk_manager import UcNativeAssetBulkManager
+
+    app.state.asset_bulk_manager = UcNativeAssetBulkManager(assets_manager)
     app.state.data_domain_manager = UcNativeDataDomainManager(entities)
     app.state.tags_manager = UcNativeTagsManager(entities)
     connections_manager = UcNativeConnectionsManager(entities, workspace_client=ws_client)

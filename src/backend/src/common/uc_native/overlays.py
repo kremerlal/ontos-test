@@ -69,6 +69,48 @@ class UcNativeOverlayStore:
         self._store.merge_row("entity_relationships", payload)
         return payload
 
+    def list_relationships(
+        self,
+        *,
+        entity_id: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        relationship_type: Optional[str | List[str]] = None,
+        limit: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        """Relationship rows, optionally filtered by endpoint or relationship type.
+
+        ``entity_id`` matches either side of the relationship; ``properties`` is
+        hydrated from ``snapshot_json``.
+        """
+        fqn = self._store.table_fqn("entity_relationships")
+        clauses: List[str] = []
+        if entity_id:
+            safe_id = str(entity_id).replace("'", "''")
+            clauses.append(
+                f"(source_entity_id = '{safe_id}' OR target_entity_id = '{safe_id}')"
+            )
+        if entity_type:
+            safe_type = str(entity_type).replace("'", "''")
+            clauses.append(
+                f"(source_entity_type = '{safe_type}' OR target_entity_type = '{safe_type}')"
+            )
+        if relationship_type:
+            types = [relationship_type] if isinstance(relationship_type, str) else list(relationship_type)
+            joined = ", ".join(f"'{str(t)}'" for t in types)
+            clauses.append(f"relationship_type IN ({joined})")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._store.query(
+            f"SELECT * FROM {fqn}{where} ORDER BY updated_at DESC LIMIT {int(limit)}"
+        )
+        return [
+            {**row, "properties": self._store.parse_snapshot(row) or {}}
+            for row in rows
+        ]
+
+    def delete_relationship(self, relationship_id: str) -> bool:
+        self._store.delete_by_id("entity_relationships", str(relationship_id))
+        return True
+
     def add_relationships(
         self,
         relationships: List[Dict[str, Any]],
@@ -183,6 +225,14 @@ class UcNativeOverlayStore:
             return False
         self._store.delete_by_id(table_name, item_id)
         return True
+
+    def list_all(self, table_name: str, *, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Return every overlay document in a table, snapshot fields merged in."""
+        rows = self._store.list_rows(table_name, limit=limit)
+        return [
+            {**self._store.parse_snapshot(row), "id": row.get("id")}
+            for row in rows
+        ]
 
     def list_for_entity(self, table_name: str, entity_type: str, entity_id: str) -> List[Dict[str, Any]]:
         rows = self._store.list_rows(table_name, limit=1000)

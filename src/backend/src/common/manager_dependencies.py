@@ -283,6 +283,22 @@ def get_directory_manager(request: Request) -> DirectoryManager:
         raise HTTPException(status_code=503, detail="Directory service not configured.")
     return manager
 
+
+def get_teams_manager(request: Request):
+    manager = getattr(request.app.state, "teams_manager", None)
+    if not manager:
+        logger.critical("TeamsManager not found in application state!")
+        raise HTTPException(status_code=503, detail="Teams service not configured.")
+    return manager
+
+
+def get_projects_manager(request: Request):
+    manager = getattr(request.app.state, "projects_manager", None)
+    if not manager:
+        logger.critical("ProjectsManager not found in application state!")
+        raise HTTPException(status_code=503, detail="Projects service not configured.")
+    return manager
+
 # --- Add other manager getters if needed --- #
 # Example:
 # def get_data_products_manager(request: Request) -> DataProductsManager:

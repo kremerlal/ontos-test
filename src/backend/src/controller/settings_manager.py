@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func
 
-from src.common.config import Settings
+from src.common.config import Settings, parse_group_list
 from src.common.sanitization import (
     APP_SHORT_NAME_MAX_LEN,
     sanitize_app_display_name,
@@ -581,20 +581,10 @@ class SettingsManager:
                 logger.error(f"Failed reading roles YAML at {ROLES_YAML_PATH}: {yaml_e}")
 
             # Parse Admin Groups
-            admin_groups = []
-            try:
-                groups_json = self._settings.APP_ADMIN_DEFAULT_GROUPS # Use self._settings
-                if groups_json:
-                    admin_groups = json.loads(groups_json)
-                    if not isinstance(admin_groups, list):
-                        logger.warning(f"APP_ADMIN_DEFAULT_GROUPS ({groups_json}) is not a valid JSON list. Defaulting Admin role to no groups.")
-                        admin_groups = []
-                else:
-                    logger.info("APP_ADMIN_DEFAULT_GROUPS is not set. Defaulting Admin role to no groups.")
-            except json.JSONDecodeError:
-                logger.warning(f"Could not parse APP_ADMIN_DEFAULT_GROUPS JSON: '{self._settings.APP_ADMIN_DEFAULT_GROUPS}'. Defaulting Admin role to no groups.")
-                admin_groups = []
-            
+            admin_groups = parse_group_list(self._settings.APP_ADMIN_DEFAULT_GROUPS)
+            if not admin_groups:
+                logger.info("APP_ADMIN_DEFAULT_GROUPS is not set or empty. Defaulting Admin role to no groups.")
+
             logger.info(f"Using default admin groups for 'Admin' role: {admin_groups}")
             all_features_config = get_feature_config() # Get the full config
             logger.info(f"Found features: {list(all_features_config.keys())}")
@@ -927,18 +917,10 @@ class SettingsManager:
                 logger.info("No 'Admin Team' found. Creating default admin team...")
                 
                 # Parse admin groups from environment
-                admin_groups = []
-                try:
-                    groups_json = self._settings.APP_ADMIN_DEFAULT_GROUPS
-                    if groups_json:
-                        admin_groups = json.loads(groups_json)
-                        if not isinstance(admin_groups, list):
-                            logger.warning(f"APP_ADMIN_DEFAULT_GROUPS is not a valid JSON list. Creating team without members.")
-                            admin_groups = []
-                except (json.JSONDecodeError, AttributeError):
-                    logger.info("Could not parse APP_ADMIN_DEFAULT_GROUPS. Creating team without initial members.")
-                    admin_groups = []
-                
+                admin_groups = parse_group_list(self._settings.APP_ADMIN_DEFAULT_GROUPS)
+                if not admin_groups:
+                    logger.info("APP_ADMIN_DEFAULT_GROUPS is not set or empty. Creating team without initial members.")
+
                 # Create Admin Team directly as DB object (tags managed separately)
                 admin_team = TeamDb(
                     name='Admin Team',

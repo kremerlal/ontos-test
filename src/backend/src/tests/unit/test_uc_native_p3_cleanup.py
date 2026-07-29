@@ -1,11 +1,17 @@
 """Unit tests for UC-native deploy hygiene helpers."""
 
+import uuid
+
 from src.common.uc_native.demo_seed import seed_demo_delta
 from src.workflows.common.uc_native_runtime import (
     lakebase_skip_message,
     resolve_job_storage_mode,
     should_use_lakebase_oltp,
 )
+
+_DEMO_NS = uuid.UUID("d0000000-0000-4000-8000-000000000001")
+_DEMO_TEAM_ID = str(uuid.uuid5(_DEMO_NS, "team:platform"))
+_DEMO_DOMAIN_ID = str(uuid.uuid5(_DEMO_NS, "domain:core"))
 
 
 def test_resolve_job_storage_mode_prefers_explicit(monkeypatch):
@@ -34,5 +40,5 @@ def test_demo_seed_writes_known_ids():
     store = FakeStore()
     created = seed_demo_delta(store)
     assert created["teams"] == 1
-    assert "demo-team-platform" in store.rows["teams"]
-    assert "demo-domain-core" in store.rows["data_domains"]
+    assert _DEMO_TEAM_ID in store.rows["teams"]
+    assert _DEMO_DOMAIN_ID in store.rows["data_domains"]

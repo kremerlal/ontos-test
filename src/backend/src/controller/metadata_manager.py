@@ -44,6 +44,36 @@ def _resolve_volume_parts(settings: Settings) -> Tuple[str, str, str]:
     return settings.DATABRICKS_CATALOG, settings.DATABRICKS_SCHEMA, configured
 
 
+def ensure_app_volume_path(ws: WorkspaceClient, settings: Settings) -> str:
+    """Ensure the configured UC volume exists and return its filesystem mount path.
+
+    Shared by the Postgres-backed and uc_native metadata managers; callers append
+    their own ``base_dir/filename`` to the returned path.
+    """
+    catalog, schema, volume = _resolve_volume_parts(settings)
+    volume_name = f"{catalog}.{schema}.{volume}"
+    volume_fs_base = f"/Volumes/{catalog}/{schema}/{volume}"
+
+    try:
+        try:
+            ws.volumes.read(volume_name)
+            logger.debug(f"Volume {volume_name} already exists")
+        except Exception:
+            logger.info(f"Creating volume {volume_name}")
+            ws.volumes.create(
+                catalog_name=catalog,
+                schema_name=schema,
+                name=volume,
+                volume_type=VolumeType.MANAGED,
+            )
+            logger.info(f"Successfully created volume {volume_name}")
+    except Exception as e:
+        logger.error(f"Failed ensuring volume/path {volume_name}: {e!s}")
+        raise
+
+    return volume_fs_base
+
+
 class MetadataManager:
     def __init__(
         self,
@@ -84,32 +114,7 @@ class MetadataManager:
         Raises:
             Exception: If volume creation or access fails
         """
-        catalog, schema, volume = _resolve_volume_parts(settings)
-        # Unity Catalog volume name (catalog.schema.volume)
-        volume_name = f"{catalog}.{schema}.{volume}"
-        # Filesystem mount path for the volume
-        volume_fs_base = f"/Volumes/{catalog}/{schema}/{volume}"
-        
-        try:
-            try:
-                # Ensure volume exists
-                ws.volumes.read(volume_name)
-                logger.debug(f"Volume {volume_name} already exists")
-            except Exception as e:
-                logger.info(f"Creating volume {volume_name}")
-                ws.volumes.create(
-                    catalog_name=catalog,
-                    schema_name=schema,
-                    name=volume,
-                    volume_type=VolumeType.MANAGED,
-                )
-                logger.info(f"Successfully created volume {volume_name}")
-        except Exception as e:
-            logger.error(f"Failed ensuring volume/path {volume_name}: {e!s}")
-            raise
-        
-        # Return FS base path; caller appends base_dir/filename
-        return volume_fs_base
+        return ensure_app_volume_path(ws, settings)
 
     # --- Rich Text ---
     def create_rich_text(self, db: Session, *, data: RichTextCreate, user_email: Optional[str]) -> RichText:

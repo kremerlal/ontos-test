@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 
 from src.models.business_roles import BusinessRoleCreate, BusinessRoleUpdate, BusinessRoleRead
-from src.controller.business_roles_manager import business_roles_manager
+from src.common.manager_dependencies import get_business_roles_manager
 from src.common.authorization import PermissionChecker
 from src.common.features import FeatureAccessLevel
 from src.common.dependencies import (
@@ -12,6 +12,7 @@ from src.common.dependencies import (
     AuditManagerDep,
     AuditCurrentUserDep,
 )
+from src.common.database import is_noop_session
 from src.common.errors import NotFoundError, ConflictError
 from src.common.logging import get_logger
 
@@ -19,10 +20,6 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/business-roles", tags=["Business Roles"])
 FEATURE_ID = "business-roles"
-
-
-def get_business_roles_manager():
-    return business_roles_manager
 
 
 @router.post(
@@ -186,6 +183,10 @@ def get_role_workflow_usage(
     db: DBSessionDep,
 ):
     """Check if a business role is referenced by any workflow steps (approval/notification)."""
+    if is_noop_session(db):
+        # Workflow step tables are Postgres-backed; unavailable in uc_native.
+        return {"role_id": str(role_id), "used_in_workflows": [], "count": 0}
+
     from src.db_models.process_workflows import WorkflowStepDb, ProcessWorkflowDb
 
     search_token = f"business:{role_id}"

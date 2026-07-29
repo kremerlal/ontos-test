@@ -17,8 +17,14 @@ router = APIRouter(prefix="/api", tags=["Quality"])
 FEATURE_ID = "data-domains"
 
 
-def get_quality_manager() -> QualityManager:
-    return QualityManager()
+def get_quality_manager(request: Request) -> QualityManager:
+    """Use the manager wired at startup, falling back to the Postgres one.
+
+    uc_native puts a Delta-backed quality manager on app.state; instantiating
+    QualityManager() unconditionally would hand every route a Postgres
+    repository with no OLTP session behind it.
+    """
+    return getattr(request.app.state, "quality_manager", None) or QualityManager()
 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────

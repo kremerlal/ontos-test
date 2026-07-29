@@ -66,7 +66,7 @@ class _FakeAssets:
     def __init__(self, docs):
         self._docs = {str(d["id"]): d for d in docs}
 
-    def get_asset(self, asset_id):
+    def get_asset_doc(self, asset_id):
         return self._docs.get(str(asset_id))
 
     def list_assets(self, limit=500):
@@ -126,6 +126,7 @@ def test_uc_native_semantic_manager_loads_ontology_graph():
         search_triples=lambda *a, **k: [],
         save_ontology_file=lambda *a, **k: "",
         merge_triples=lambda *a, **k: 0,
+        load_all_triples=lambda *a, **k: [],
         append_job_result=lambda *a, **k: "",
     )
     data_dir = Path(__file__).resolve().parents[2] / "data"
@@ -150,29 +151,41 @@ def test_uc_native_semantic_manager_loads_ontology_graph():
     assert details.label
 
 
+class _FakeSemanticStore:
+    """Stands in for the Delta-backed store, keeping rows in memory."""
+
+    def __init__(self):
+        self.saved = {}
+        self.rows = []
+
+    def search_triples(self, *a, **k):
+        return []
+
+    def save_ontology_file(self, filename, content):
+        self.saved["file"] = (filename, content)
+        return f"/vol/{filename}"
+
+    def merge_triples(self, triples):
+        self.saved.setdefault("triples", []).extend(triples)
+        self.rows.extend(dict(t) for t in triples)
+        return len(triples)
+
+    def load_all_triples(self, **_):
+        return [dict(row) for row in self.rows]
+
+    def append_job_result(self, *a, **k):
+        return ""
+
+
 def test_uc_native_semantic_manager_create_and_import_collection(tmp_path):
     from pathlib import Path
     from src.common.uc_native.semantic_manager import UcNativeSemanticModelsManager
 
-    saved = {}
-
-    class _Semantic:
-        def search_triples(self, *a, **k):
-            return []
-
-        def save_ontology_file(self, filename, content):
-            saved["file"] = (filename, content)
-            return f"/vol/{filename}"
-
-        def merge_triples(self, triples):
-            saved.setdefault("triples", []).extend(triples)
-            return len(triples)
-
-        def append_job_result(self, *a, **k):
-            return ""
+    store = _FakeSemanticStore()
+    saved = store.saved
 
     data_dir = Path(__file__).resolve().parents[2] / "data"
-    mgr = UcNativeSemanticModelsManager(_Semantic(), data_dir=data_dir)
+    mgr = UcNativeSemanticModelsManager(store, data_dir=data_dir)
     coll = mgr.create_collection(
         label="Generated Demo Ontology",
         collection_type="ontology",
@@ -196,6 +209,49 @@ def test_uc_native_semantic_manager_create_and_import_collection(tmp_path):
     assert saved.get("file")
     refreshed = mgr.get_collection(coll["iri"])
     assert refreshed["concept_count"] >= 1
+
+
+def test_uc_native_collection_survives_restart():
+    """A fresh manager (new container after redeploy) must see persisted collections."""
+    from pathlib import Path
+    from src.common.uc_native.semantic_manager import UcNativeSemanticModelsManager
+
+    store = _FakeSemanticStore()
+    data_dir = Path(__file__).resolve().parents[2] / "data"
+
+    first = UcNativeSemanticModelsManager(store, data_dir=data_dir)
+    coll = first.create_collection(
+        label="Weather Domain Ontology",
+        collection_type="ontology",
+        description="imported by the generator",
+        created_by="tester@example.com",
+    )
+    turtle = """
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix : <http://example.org/weather#> .
+:Observation a owl:Class ;
+    rdfs:label "Observation"@en ;
+    rdfs:comment "A weather reading." .
+"""
+    first.import_rdf_to_collection(coll["iri"], turtle, format="turtle")
+
+    # New process: same Delta rows, brand-new in-memory graph.
+    second = UcNativeSemanticModelsManager(store, data_dir=data_dir)
+    reloaded = second.get_collection(coll["iri"])
+    assert reloaded is not None
+    assert reloaded["label"] == "Weather Domain Ontology"
+    assert reloaded["collection_type"] == "ontology"
+    assert reloaded["description"] == "imported by the generator"
+    assert reloaded["created_by"] == "urn:user:tester@example.com"
+    assert reloaded["is_editable"] is True
+    assert reloaded["concept_count"] >= 3
+
+    concept = second.get_concept_details("http://example.org/weather#Observation")
+    assert concept is not None
+    # Language-tagged and plain literals must come back as literals, not IRIs.
+    assert concept.label == "Observation"
+    assert concept.comment == "A weather reading."
 
 
 def test_ontology_generator_memory_runs_without_postgres():

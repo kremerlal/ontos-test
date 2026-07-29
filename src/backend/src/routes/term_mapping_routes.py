@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from ..common.authorization import PermissionChecker
-from ..common.database import get_db
+from ..common.database import get_db, is_noop_session
 from ..common.dependencies import CurrentUserDep
 from ..common.features import FeatureAccessLevel
 from ..common.logging import get_logger
@@ -74,7 +74,7 @@ async def create_run(
     """
     # UC-native uses a NoOp DB session — term-mapping run/suggestion tables are
     # still Postgres-backed. Fail clearly instead of returning a phantom run.
-    if type(db).__name__ == "_NoOpDbSession":
+    if is_noop_session(db):
         raise HTTPException(
             status_code=501,
             detail=(

@@ -175,7 +175,7 @@ class UcNativeEntityRelationshipsManager:
     def _resolve_name(self, entity_type: str, entity_id: str) -> Optional[str]:
         if self._assets is not None:
             try:
-                doc = self._assets.get_asset(str(entity_id))
+                doc = self._assets.get_asset_doc(str(entity_id))
                 if doc and doc.get("name"):
                     return doc["name"]
             except Exception:
